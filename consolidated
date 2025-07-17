@@ -1,0 +1,4136 @@
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\guess_the_number.py
+import random
+
+def guess_the_number():
+    secret_number = random.randint(1, 100)
+    attempts = 0
+    print("Welcome to Guess the Number!")
+    print("I'm thinking of a number between 1 and 100.")
+
+    while True:
+        try:
+            guess = int(input("Enter your guess: "))
+            attempts += 1
+
+            if guess < secret_number:
+                print("Too low! Try again.")
+            elif guess > secret_number:
+                print("Too high! Try again.")
+            else:
+                print(f"Congratulations! You guessed the number {secret_number} in {attempts} attempts!")
+                break
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+if __name__ == "__main__":
+    guess_the_number()
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\logger_server.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\logger_server.py
+import socket
+import datetime
+import json
+import os
+import platform
+import re # --- ADDED: For parsing the usage string ---
+from pygments import highlight
+from pygments.lexers import JsonLexer
+from pygments.formatters import TerminalFormatter
+from utils.colors import Colors # Import from the new location
+
+# On Windows, this command initializes the console to correctly
+# interpret ANSI color codes. This is crucial when launching a new console.
+if platform.system() == "Windows":
+    os.system('')
+
+HOST = '127.0.0.1'
+PORT = 9999
+
+def highlight_json(text: str) -> str:
+    """Tries to pretty-print and syntax-highlight a string as JSON."""
+    try:
+        parsed_json = json.loads(text)
+        formatted_json = json.dumps(parsed_json, indent=2)
+        return highlight(formatted_json, JsonLexer(), TerminalFormatter())
+    except (json.JSONDecodeError, TypeError):
+        return text
+
+def print_colored(tag: str, message: str):
+    """
+    Prints a beautifully formatted and colored log message based on its tag and content.
+    """
+    timestamp = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    
+    tag_color_map = {
+        "USER_MESSAGE": Colors.GREEN,
+        "AI_RAW_RESPONSE": Colors.CYAN,
+        "ACTION_JSON": Colors.BLUE,
+        "ROUTING": Colors.YELLOW,
+        "TOOL_RESULT": Colors.MAGENTA,
+        # --- ADDED: New tag for image analysis logging ---
+        "IMAGE_ANALYSIS": Colors.BRIGHT_MAGENTA,
+        "ERROR": Colors.RED
+    }
+    
+    tag_color = tag_color_map.get(tag, Colors.WHITE)
+    
+    log_header = f"{Colors.WHITE}{timestamp}{Colors.RESET} {tag_color}{Colors.BOLD}[{tag}]{Colors.RESET}"
+    
+    message_color = Colors.WHITE
+    processed_message = message
+    
+    # --- FIXED: Handle special coloring for the new API Usage message ---
+    if tag == "ROUTING" and message.startswith("Key "):
+        # Use regex to find and color the numbers for Daily and RPM counts
+        processed_message = re.sub(
+            r"(RPM: )(\d+)",
+            rf"\1{Colors.CYAN}\2{Colors.RESET}",
+            message
+        )
+        processed_message = re.sub(
+            r"(Daily: )(\d+)",
+            rf"\1{Colors.YELLOW}\2{Colors.RESET}",
+            processed_message
+        )
+    elif tag in ["ACTION_JSON", "AI_RAW_RESPONSE"]:
+        processed_message = highlight_json(message)
+    elif tag == "ERROR":
+        message_color = Colors.BRIGHT_RED
+    elif tag == "TOOL_RESULT" and message.strip().startswith("Error:"):
+        message_color = Colors.BRIGHT_RED
+    elif tag == "USER_MESSAGE":
+        message_color = Colors.BRIGHT_WHITE
+
+    indented_message = "\n".join(["  " + line for line in processed_message.splitlines()])
+    
+    print(f"{log_header}\n{message_color}{indented_message}{Colors.RESET}")
+
+def start_logger_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        print_colored("ROUTING", f"Logger server started. Listening on {HOST}:{PORT}")
+        while True:
+            conn, addr = s.accept()
+            with conn:
+                full_data = b''
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    full_data += data
+                
+                if full_data:
+                    try:
+                        message_str = full_data.decode('utf-8')
+                        tag, message = message_str.split('::', 1)
+                        print_colored(tag.strip(), message.strip())
+                    except ValueError:
+                        print_colored("ERROR", f"Received malformed log message: {full_data.decode('utf-8', errors='ignore')}")
+                    except Exception as e:
+                        print_colored("ERROR", f"An unexpected error occurred in logger: {e}")
+
+if __name__ == "__main__":
+    start_logger_server()
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\log_client.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\log_client.py
+import socket
+
+HOST = '127.0.0.1'
+PORT = 9999
+
+def log_message(tag: str, message: str):
+    """Sends a formatted message to the logger server."""
+    # This is a list of all known tags. It's not strictly necessary but is good practice.
+    # The new tag is AI_FINAL_RESPONSE.
+    known_tags = [
+        "USER_MESSAGE",
+        "AI_RAW_RESPONSE",
+        "AI_FINAL_RESPONSE",
+        "ACTION_JSON",
+        "ROUTING",
+        "TOOL_RESULT",
+        # --- ADDED: New tag for image analysis ---
+        "IMAGE_ANALYSIS",
+        "ERROR"
+    ]
+    
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((HOST, PORT))
+            # Ensure the tag is always uppercase for consistency
+            formatted_message = f"{tag.upper()}::{message}"
+            s.sendall(formatted_message.encode('utf-8'))
+    except ConnectionRefusedError:
+        print(f"[LOGGER OFFLINE] {tag.upper()}: {message}")
+    except Exception as e:
+        print(f"[LOGGER ERROR] Could not send log. Error: {e}")
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\main.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\main.py
+import uvicorn
+import subprocess
+import sys
+import os
+# --- MODIFIED: Added UploadFile, File, and JSONResponse for the new endpoint ---
+import uuid
+import shutil
+import urllib.parse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from api.chat import chat_router
+from api.metrics import metrics_router # --- ADDED: Import the new metrics router ---
+from tools.tool_manager import load_tools
+# Import the centrally configured provider info
+from llm.client import LLM_PROVIDER_NAME, MODEL_NAME 
+
+# --- ADDED: Check for optional dependencies and print a friendly message ---
+try:
+    import playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
+try:
+    import pyautogui
+    PYAUTOGUI_AVAILABLE = True
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
+
+
+app = FastAPI(title="AI Sentinel")
+load_tools()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(chat_router)
+app.include_router(metrics_router) # --- ADDED: Include the metrics router ---
+
+# --- SECURE STAGING DIRECTORIES ---
+DOWNLOAD_STAGING_DIR = os.path.join(os.getcwd(), "temp_downloads")
+if not os.path.exists(DOWNLOAD_STAGING_DIR):
+    os.makedirs(DOWNLOAD_STAGING_DIR)
+
+# ADDED: A dedicated, safe directory for incoming file uploads.
+UPLOAD_STAGING_DIR = os.path.join(os.getcwd(), "temp_uploads")
+if not os.path.exists(UPLOAD_STAGING_DIR):
+    os.makedirs(UPLOAD_STAGING_DIR)
+
+# --- ADDED: A dedicated directory for AI-generated images ---
+GENERATED_IMAGES_DIR = os.path.join(os.getcwd(), "temp_generated_images")
+if not os.path.exists(GENERATED_IMAGES_DIR):
+    os.makedirs(GENERATED_IMAGES_DIR)
+
+
+# --- MODIFIED: Root now serves the login page ---
+@app.get("/", response_class=FileResponse, include_in_schema=False)
+async def read_login():
+    return FileResponse('static/login.html')
+
+# --- ADDED: New endpoint for the main chat application ---
+@app.get("/chat_app", response_class=FileResponse, include_in_schema=False)
+async def read_chat_app():
+    return FileResponse('static/index.html')
+
+# --- ADDED: New endpoint to handle direct file sharing ---
+@app.post("/share_file")
+async def share_file_handler(file: UploadFile = File(...)):
+    """
+    Handles a file upload with the intent to immediately create a shareable link.
+    This bypasses the AI agent for speed.
+    """
+    try:
+        # Sanitize filename to prevent security issues like path traversal
+        original_filename = os.path.basename(file.filename)
+        # Use a UUID to prevent filename collisions
+        unique_filename = f"{uuid.uuid4()}_{original_filename}"
+        file_path = os.path.join(DOWNLOAD_STAGING_DIR, unique_filename)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        encoded_filename = urllib.parse.quote(unique_filename)
+        return JSONResponse({
+            "file_download": True,
+            "filename": original_filename, # Return the original name for user display
+            "download_url": f"/download/{encoded_filename}"
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to share file: {e}")
+
+@app.get("/download/{filename}", response_class=FileResponse)
+async def secure_download_file(filename: str):
+    """
+    Provides a secure way to download files.
+    It now checks multiple staging directories and sets the correct media type for images.
+    """
+    decoded_filename = urllib.parse.unquote(filename)
+    
+    allowed_dirs = [DOWNLOAD_STAGING_DIR, GENERATED_IMAGES_DIR]
+    file_path = None
+    
+    for directory in allowed_dirs:
+        potential_path = os.path.join(directory, decoded_filename)
+        if os.path.exists(potential_path):
+            if not os.path.abspath(potential_path).startswith(os.path.abspath(directory)):
+                raise HTTPException(status_code=403, detail="Access Denied: Unsafe file path.")
+            file_path = potential_path
+            break
+            
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found on server. It might have expired or been cleared.")
+        
+    # --- MODIFIED: Intelligently set the media type for proper browser handling ---
+    media_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+    }
+    file_ext = os.path.splitext(decoded_filename)[1].lower()
+    media_type = media_types.get(file_ext, 'application/octet-stream')
+
+    try:
+        if decoded_filename.split('_')[0].count('-') == 4:
+             original_filename = "_".join(decoded_filename.split('_')[1:])
+        else:
+             original_filename = decoded_filename
+    except IndexError:
+        original_filename = decoded_filename
+
+    # For images, we don't want to force a download, so we don't set the filename content-disposition
+    response_filename = original_filename if media_type == 'application/octet-stream' else None
+
+    return FileResponse(path=file_path, media_type=media_type, filename=response_filename)
+
+if __name__ == "__main__":
+    print("Starting logger server in a new window...")
+    try:
+        # Clear staging directories on startup for a clean slate.
+        for dir_path in [DOWNLOAD_STAGING_DIR, UPLOAD_STAGING_DIR, GENERATED_IMAGES_DIR]:
+            if os.path.exists(dir_path):
+                for f in os.listdir(dir_path):
+                    os.remove(os.path.join(dir_path, f))
+                print(f"Cleared temporary directory: {dir_path}")
+
+        subprocess.Popen([sys.executable, "logger_server.py"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    except Exception as e:
+        print(f"Failed to start logger server or clear temp directories: {e}")
+    
+    print("\n" + "="*50)
+    print(f"🚀 LLM Provider: \033[1m\033[96m{LLM_PROVIDER_NAME.upper()}\033[0m")
+    print(f"🤖 Model: \033[1m\033[93m{MODEL_NAME}\033[0m")
+    # --- ADDED: Optional dependency status ---
+    if PLAYWRIGHT_AVAILABLE:
+        print(f"✅ Web Automation: \033[92mEnabled (Playwright installed)\033[0m")
+    else:
+        print(f"⚠️ Web Automation: \033[93mDisabled. Run 'pip install playwright' and 'playwright install' to enable.\033[0m")
+
+    if PYAUTOGUI_AVAILABLE:
+        print(f"✅ GUI Automation: \033[92mEnabled (PyAutoGUI installed)\033[0m")
+    else:
+        print(f"⚠️ GUI Automation: \033[93mDisabled. Run 'pip install pyautogui pyperclip' to enable.\033[0m")
+    print("="*50 + "\n")
+
+
+    HOST_IP = "127.0.0.1"
+    HOST_PORT = 8000
+    print(f"Starting AI Sentinel server at http://{HOST_IP}:{HOST_PORT}")
+    uvicorn.run(app, host=HOST_IP, port=HOST_PORT)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\api\chat.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\api\chat.py
+import json
+import os
+import uuid
+import shutil
+import urllib.parse
+from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from core.agent import Agent # Import Agent class
+from llm.client import client, MODEL_NAME
+from log_client import log_message
+
+chat_router = APIRouter()
+UPLOAD_STAGING_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_uploads"))
+
+async def stream_and_log_response(messages: list):
+    """Helper function to stream responses from the LLM."""
+    full_response_chunks = []
+    stream = client.chat.completions.create(model=MODEL_NAME, messages=messages, stream=True, temperature=0.7)
+    
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta:
+            content = chunk.choices[0].delta.content
+            if content:
+                full_response_chunks.append(content)
+                yield content
+    
+    final_text = "".join(full_response_chunks)
+    log_message("AI_FINAL_RESPONSE", final_text)
+
+@chat_router.post("/chat")
+async def chat_handler(request: Request):
+    """Handles text-only chat messages."""
+    data = await request.json()
+    agent = Agent(history=data.get("history", []), history_length=data.get("historyLength", 10))
+    response_data = await agent.get_response(user_message=data.get("message"))
+    
+    return await process_agent_response(response_data)
+
+@chat_router.post("/chat_with_upload")
+async def chat_with_upload_handler(
+    message: str = Form(...),
+    history: str = Form("[]"),
+    historyLength: int = Form(10),
+    upload_mode: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """Handles chat messages that include a file upload."""
+    try:
+        original_filename = file.filename
+        temp_filename = f"{uuid.uuid4()}_{original_filename}"
+        temp_filepath = os.path.join(UPLOAD_STAGING_DIR, temp_filename)
+
+        with open(temp_filepath, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        log_message("ROUTING", f"User uploaded '{original_filename}' (mode: {upload_mode}), saved as '{temp_filename}'")
+        
+        uploaded_file_info = {"original_name": original_filename, "temp_name": temp_filename, "mode": upload_mode}
+        
+        agent = Agent(history=json.loads(history), history_length=historyLength)
+        response_data = await agent.get_response(user_message=message, uploaded_file_info=uploaded_file_info)
+
+        return await process_agent_response(response_data)
+    except Exception as e:
+        log_message("ERROR", f"File upload handler failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- MODIFIED: This handler now accepts an `action_list` ---
+@chat_router.post("/execute_action")
+async def execute_action_handler(request: Request):
+    """Handles user approval to execute a tool or a sequence of tools."""
+    data = await request.json()
+    if not data.get("approved"):
+        log_message("ROUTING", "User denied action.")
+        return StreamingResponse(stream_and_log_response([{"role": "system", "content": "The user denied permission. Inform them you have cancelled the request."}]))
+
+    action_list = data.get("action_list", [])
+    if not action_list:
+         raise HTTPException(status_code=400, detail="No action list provided.")
+
+    agent = Agent(history=data.get("history", []))
+    # --- MODIFIED: Pass the entire list to the agent for execution ---
+    response_data = await agent.execute_action(action_list=action_list)
+    
+    return await process_agent_response(response_data)
+
+
+async def process_agent_response(response_data: dict):
+    """Converts the agent's response data into a valid FastAPI response."""
+    response_type = response_data.get("type")
+
+    # --- MODIFIED: This block now formats a list of actions for approval ---
+    if response_type == "action_request":
+        action_list = response_data['action_list']
+        log_message("ROUTING", f"Requesting user approval for {len(action_list)} tool(s).")
+        
+        # Build a confirmation message that lists all proposed actions.
+        confirmation_parts = ["The AI Sentinel wants to run the following sequence of actions:"]
+        for i, action in enumerate(action_list):
+            params = action.get('parameters', {})
+            confirmation_parts.append(
+                f"\n**{i+1}. Tool: `{action.get('action')}`**\n"
+                f"   - Parameters: `{json.dumps(params)}`"
+            )
+        confirmation_parts.append("\nDo you approve this plan?")
+        confirmation_msg = "\n".join(confirmation_parts)
+
+        return JSONResponse({
+            "action_request": True,
+            "response": confirmation_msg,
+            "action_list": action_list, # Send the list to the frontend
+            "history": response_data['history']
+        })
+
+    elif response_type == "stream":
+        return StreamingResponse(stream_and_log_response(response_data["messages"]), media_type="text/plain")
+
+    elif response_type == "direct_message":
+        async def direct_stream():
+            yield response_data["content"]
+        log_message("AI_FINAL_RESPONSE", response_data["content"])
+        return StreamingResponse(direct_stream(), media_type="text/plain")
+
+    elif response_type == "generated_image":
+        unique_filename = response_data["unique_filename"]
+        log_message("ROUTING", f"Image '{unique_filename}' generated. Sending link to client.")
+        encoded_filename = urllib.parse.quote(unique_filename)
+        return JSONResponse({
+            "generated_image": True,
+            "prompt": response_data["prompt"],
+            "download_url": f"/download/{encoded_filename}",
+            "history": response_data.get("history", []) # Pass back history
+        })
+        
+    elif response_type == "screenshot_taken":
+        unique_filename = response_data["unique_filename"]
+        log_message("ROUTING", f"Screenshot '{unique_filename}' taken. Sending link to client.")
+        encoded_filename = urllib.parse.quote(unique_filename)
+        return JSONResponse({
+            "screenshot_taken": True,
+            "download_url": f"/download/{encoded_filename}",
+            "history": response_data.get("history", []) # Pass back history
+        })
+
+    elif response_type == "file_download":
+        filename = response_data["filename"]
+        unique_filename = response_data.get("unique_filename", filename)
+        log_message("ROUTING", f"Filename '{filename}' extracted for download link.")
+        encoded_filename = urllib.parse.quote(unique_filename)
+        return JSONResponse({
+            "file_download": True,
+            "filename": filename,
+            "download_url": f"/download/{encoded_filename}",
+            "history": response_data.get("history", []) # Pass back history
+        })
+    
+    elif response_type == "capability_list":
+        return JSONResponse({
+            "capability_list": True,
+            "tools": response_data["tools"]
+        })
+    
+    # Fallback for unexpected cases
+    return JSONResponse({"error": "Invalid agent response type"}, status_code=500)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\api\metrics.py
+import asyncio
+import psutil
+import time
+import platform
+import datetime
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+
+metrics_router = APIRouter()
+
+last_net_io = psutil.net_io_counters()
+last_time = time.time()
+
+async def get_initial_system_info():
+    """Gathers static system information to send on client connect."""
+    boot_time = datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "type": "initial",
+        "hostname": platform.node(),
+        "os": f"{platform.system()} {platform.release()}",
+        "cpu_arch": platform.processor(),
+        "cpu_cores": psutil.cpu_count(logical=False),
+        "cpu_logical_processors": psutil.cpu_count(logical=True),
+        "boot_time": boot_time,
+    }
+
+@metrics_router.websocket("/ws/metrics")
+async def metrics_ws(websocket: WebSocket):
+    """WebSocket endpoint to stream live system metrics."""
+    global last_net_io, last_time
+    await websocket.accept()
+    
+    initial_data = await get_initial_system_info()
+    await websocket.send_json(initial_data)
+
+    # Prime psutil by calling cpu_percent once before the loop.
+    psutil.cpu_percent(interval=None, percpu=True)
+    # Prime each process's CPU usage calculation
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            proc.cpu_percent()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    try:
+        while True:
+            # Let the system rest for a moment to get a meaningful CPU reading
+            await asyncio.sleep(1)
+
+            # Per-Core CPU metrics
+            cpu_per_core = psutil.cpu_percent(percpu=True)
+            cpu_total = sum(cpu_per_core) / len(cpu_per_core)
+            
+            ram = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+
+            disks = []
+            partitions = psutil.disk_partitions()
+            for part in partitions:
+                if 'cdrom' in part.opts or part.fstype == '':
+                    continue
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    disks.append({
+                        "device": part.device, "mountpoint": part.mountpoint,
+                        "percent": usage.percent, "used_gb": round(usage.used / (1024**3), 2),
+                        "total_gb": round(usage.total / (1024**3), 2),
+                    })
+                except Exception:
+                    continue
+
+            gpus = []
+            if GPU_AVAILABLE:
+                try:
+                    gpu_data = GPUtil.getGPUs()
+                    for gpu in gpu_data:
+                        gpus.append({
+                            "name": gpu.name, "load": gpu.load * 100,
+                            "memory_used": gpu.memoryUsed, "memory_total": gpu.memoryTotal,
+                            "memory_percent": (gpu.memoryUsed / gpu.memoryTotal) * 100 if gpu.memoryTotal > 0 else 0
+                        })
+                except Exception:
+                    gpus.append({"name": "NVIDIA GPU", "load": "Error", "memory_percent": "Error"})
+            
+            current_net_io = psutil.net_io_counters()
+            current_time = time.time()
+            elapsed_time = current_time - last_time
+            
+            bytes_sent = current_net_io.bytes_sent - last_net_io.bytes_sent
+            bytes_recv = current_net_io.bytes_recv - last_net_io.bytes_recv
+            
+            upload_speed = bytes_sent / elapsed_time if elapsed_time > 0 else 0
+            download_speed = bytes_recv / elapsed_time if elapsed_time > 0 else 0
+            
+            last_net_io = current_net_io
+            last_time = current_time
+
+            processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'memory_info']):
+                try:
+                    # --- FIX: Consistently call proc.cpu_percent() to get an accurate reading over the interval. ---
+                    cpu_usage = proc.cpu_percent()
+                    mem_info = proc.info.get('memory_info')
+                    
+                    processes.append({
+                        "pid": proc.pid,
+                        "name": proc.name(),
+                        "cpu_usage": cpu_usage,
+                        "memory_mb": round(mem_info.rss / (1024**2), 2) if mem_info else 0
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            data = {
+                "type": "update",
+                "cpu": {"total": cpu_total, "per_core": cpu_per_core},
+                "ram": {"percent": ram.percent, "used_gb": round(ram.used/(1024**3),2), "total_gb": round(ram.total/(1024**3),2)},
+                "swap": {"percent": swap.percent, "used_gb": round(swap.used/(1024**3),2), "total_gb": round(swap.total/(1024**3),2)},
+                "network": {"upload_kbps": upload_speed / 1024, "download_kbps": download_speed / 1024},
+                "disks": disks,
+                "gpus": gpus,
+                "processes": sorted(processes, key=lambda p: p['cpu_usage'], reverse=True)[:100]
+            }
+            
+            await websocket.send_json(data)
+            # The asyncio.sleep(1) is now at the top of the loop, so no need for another one here.
+
+    except WebSocketDisconnect:
+        print("Metrics client disconnected.")
+    except Exception as e:
+        print(f"Error in metrics websocket: {e}")
+        await websocket.close(code=1011)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent.py
+from tools.tool_manager import get_structured_tool_data
+from log_client import log_message
+
+# --- ADDED: Import the new modular components ---
+from .agent_logic.planner import Planner
+from .agent_logic.executor import Executor
+from .agent_logic.responder import Responder
+from .agent_logic.corrector import Corrector
+
+class Agent:
+    """
+    The orchestrator for the AI Sentinel. It manages the agent's state (history)
+    and delegates tasks to specialized logic modules for planning, execution,
+    and response generation.
+    """
+    def __init__(self, history: list = None, history_length: int = 10):
+        self.history = history if history is not None else []
+        self.history_length = history_length
+        
+        # --- ADDED: Instantiate the logic modules using a composition pattern ---
+        self.responder = Responder()
+        self.planner = Planner()
+        self.corrector = Corrector(self.planner, self.responder)
+        self.executor = Executor(self.planner, self.responder, self.corrector)
+
+    async def get_response(self, user_message: str, uploaded_file_info: dict = None):
+        """
+        The main entry point to get a response from the agent. It processes the user's
+        message, decides on a plan, and returns the appropriate response.
+        """
+        log_message("USER_MESSAGE", user_message)
+        
+        user_message_with_context = self._add_upload_context(user_message, uploaded_file_info)
+        
+        if self._is_capability_request(user_message):
+            log_message("ROUTING", "Bypassing LLM for capability request.")
+            return {"type": "capability_list", "tools": get_structured_tool_data()}
+
+        self._truncate_history()
+        self.history.append({"role": "user", "content": user_message_with_context})
+
+        # --- MODIFIED: Delegate planning to the Planner module ---
+        action_list = await self.planner.select_tool(self.history)
+        
+        if not action_list or action_list[0].get("action") == "conversation":
+            # --- MODIFIED: Delegate conversational response to the Responder module ---
+            return self.responder.get_conversational_response(self.history)
+
+        # Return the generated plan to the user for approval
+        return {
+            "type": "action_request",
+            "action_list": action_list,
+            "history": self.history
+        }
+
+    async def execute_action(self, action_list: list):
+        """
+        Executes a sequence of approved actions by delegating to the Executor module.
+        """
+        # --- MODIFIED: The core execution logic is now handled by the Executor. ---
+        # We pass `self` to the executor so it can manage the agent's history state
+        # throughout the execution flow.
+        return await self.executor.execute_action_list(action_list, self)
+
+    def _add_upload_context(self, user_message, uploaded_file_info):
+        """Adds context to the user message if a file was uploaded."""
+        if not uploaded_file_info:
+            return user_message
+            
+        upload_mode = uploaded_file_info.get('mode', 'save')
+        
+        if upload_mode == 'analyze':
+            intent_text = "for analysis"
+            tool_suggestion = "the 'analyze_file' tool"
+        elif upload_mode == 'share':
+            intent_text = "to be shared"
+            tool_suggestion = "the 'send_file' tool"
+        else:
+            intent_text = "to be saved"
+            tool_suggestion = "the 'save_uploaded_file' tool"
+
+        return (
+            f"{user_message}\n\n"
+            f"[System Note: User uploaded '{uploaded_file_info['original_name']}' {intent_text}. "
+            f"It's temporarily named '{uploaded_file_info['temp_name']}'. "
+            f"Your goal is to use {tool_suggestion} on it.]"
+        )
+
+    def _is_capability_request(self, user_message: str):
+        """Checks if the user is asking for the agent's capabilities."""
+        exact_phrases = {"help", "commands", "what can you do", "what can you do?", "show commands"}
+        return user_message.lower().strip() in exact_phrases
+
+    def _truncate_history(self):
+        """Ensures the conversation history does not exceed the defined limit."""
+        if len(self.history) > self.history_length:
+            self.history = self.history[-self.history_length:]
+            log_message("ROUTING", f"History truncated to the last {self.history_length} turns.")
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\llm\client.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\llm\client.py
+# llm/client.py
+import openai
+import sys
+import os
+import json
+from datetime import datetime
+import time
+import uuid
+
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
+# --- ADDED: Import PIL for image handling ---
+try:
+    import PIL.Image
+except ImportError:
+    print("\n\033[91mWarning: Pillow library not found. Image analysis will not work. Please run 'pip install Pillow'.\033[0m")
+    PIL = None
+
+# --- ADDED: Import httpx for async image downloading ---
+try:
+    import httpx
+except ImportError:
+    print("\n\033[91mWarning: httpx library not found. Image generation with some providers will not work. Please run 'pip install httpx'.\03d[0m")
+    httpx = None
+
+
+# --- CORRECTED: Import Colors from the central utils location ---
+from log_client import log_message
+from utils.colors import Colors
+
+
+# --- ADDED: A dedicated staging directory for generated images ---
+# This keeps them separate from user uploads or file-sharing downloads.
+GENERATED_IMAGES_DIR = os.path.join(os.getcwd(), "temp_generated_images")
+if not os.path.exists(GENERATED_IMAGES_DIR):
+    os.makedirs(GENERATED_IMAGES_DIR)
+
+
+# --- MODIFIED: A tracker that now handles proactive rotation and colorful logging ---
+class ApiUsageTracker:
+    # To test rotation, you can temporarily set RPM_LIMIT_PER_KEY to a low number like 5.
+    DAILY_LIMIT_PER_KEY = 245 # officially 250, but reserve 5 for internal use 
+    RPM_LIMIT_PER_KEY = 9 # 10 requests per minute, but reserve 1 for internal use
+
+    def __init__(self, provider_name: str, keys: list, rotation_callback: callable):
+        self.filepath = os.path.join(os.getcwd(), 'api_usage.json')
+        self.provider_name = provider_name
+        self.keys = keys
+        self.rotation_callback = rotation_callback
+        # In-memory tracking for RPM
+        self.request_timestamps = {key: [] for key in self.keys}
+
+    def _get_key_identifier(self, key: str):
+        return f"{key[:5]}...{key[-4:]}"
+
+    def _load_data(self) -> dict:
+        try:
+            with open(self.filepath, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_data(self, data: dict):
+        with open(self.filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def prepare_for_request(self):
+        """
+        Proactively checks if the current key is valid. If not, rotates to the next
+        valid key. Handles both daily and RPM limits.
+        """
+        global current_key_index
+        
+        for i in range(len(self.keys)):
+            check_index = (current_key_index + i) % len(self.keys)
+            key_to_check = self.keys[check_index]
+            key_id = self._get_key_identifier(key_to_check)
+            
+            # 1. Check Daily Limit
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            usage_data = self._load_data()
+            # Correctly navigate the data structure for the specific key
+            daily_usage = usage_data.get(self.provider_name, {}).get(key_id, {}).get(today_str, 0)
+
+            if daily_usage >= self.DAILY_LIMIT_PER_KEY:
+                log_message("ROUTING", f"Key {Colors.YELLOW}{key_id}{Colors.RESET} has hit its daily limit. Checking next key.")
+                continue 
+
+            # 2. Check RPM Limit
+            now = time.time()
+            one_minute_ago = now - 60
+            self.request_timestamps[key_to_check] = [ts for ts in self.request_timestamps[key_to_check] if ts > one_minute_ago]
+            current_rpm = len(self.request_timestamps[key_to_check])
+            if current_rpm >= self.RPM_LIMIT_PER_KEY:
+                log_message("ROUTING", f"Key {Colors.YELLOW}{key_id}{Colors.RESET} is at its RPM limit. Checking next key.")
+                continue 
+            
+            if check_index != current_key_index:
+                log_message("ROUTING", f"Switching to valid key {Colors.GREEN}{key_id}{Colors.RESET}.")
+                self.rotation_callback(check_index)
+            
+            return
+
+        raise Exception("All available API keys have exceeded their usage limits.")
+
+    def track_successful_request(self):
+        """Called AFTER a successful request to update counts and log it."""
+        global current_key_index
+        active_key = self.keys[current_key_index]
+        key_id = self._get_key_identifier(active_key)
+        
+        # Update daily count in JSON file
+        now = datetime.now()
+        today_str = now.strftime('%Y-%m-%d')
+        data = self._load_data()
+        
+        # Correctly create nested dictionaries if they don't exist
+        data.setdefault(self.provider_name, {})
+        data[self.provider_name].setdefault(key_id, {})
+        new_count = data[self.provider_name][key_id].get(today_str, 0) + 1
+        data[self.provider_name][key_id][today_str] = new_count
+        self._save_data(data)
+
+        # Update RPM count in memory
+        self.request_timestamps[active_key].append(time.time())
+        current_rpm = len([ts for ts in self.request_timestamps[active_key] if ts > now.timestamp() - 60])
+        
+        # --- MODIFIED: Added Key Index to the log message ---
+        rpm_color = Colors.GREEN if current_rpm < self.RPM_LIMIT_PER_KEY * 0.75 else Colors.YELLOW
+        daily_color = Colors.GREEN if new_count < self.DAILY_LIMIT_PER_KEY * 0.75 else Colors.YELLOW
+        total_keys = len(self.keys)
+        
+        log_msg = (
+            f"Key {Colors.CYAN}{key_id}{Colors.RESET} "
+            f"[{Colors.BLUE}{current_key_index + 1}/{total_keys}{Colors.RESET}] | "
+            f"RPM: {rpm_color}{current_rpm}/{self.RPM_LIMIT_PER_KEY}{Colors.RESET} | "
+            f"Daily: {daily_color}{new_count}/{self.DAILY_LIMIT_PER_KEY}{Colors.RESET}"
+        )
+        log_message("ROUTING", log_msg)
+
+
+# --- LLM CONFIGURATION HUB ---
+LLM_MODE = 'gemini' 
+GEMINI_API_KEYS = [
+    "AIzaSyBNH9Yik9CHql1WxldIYrcQGqQiR0PSj9A",
+    "AIzaSyAEAGY-xk1lriRzBIDdDDDCwU4V7Gce_Vo",
+    "AIzaSyCdBaU5FUZkntnE95TW3OuK4tiaL1NEYr8",
+    "AIzaSyDro-b8p8Px0gUQxq_f7m6SVqmUsOra6b0",
+    "AIzaSyAR_mmVZGcoTLqQtlhBHvoO7A1gU56yd_Y",
+]
+GAPGPT_API_KEY = "sk-2micSwSP10JyqMEOC9f34DkFX1nZ7k3mQhxvW5JUKnduGmjL"
+OPENAI_API_KEY = "sk-YOUR-REAL-OPENAI-KEY"
+
+
+# --- Global variables ---
+client = None
+current_key_index = 0
+LLM_PROVIDER_NAME = ""
+MODEL_NAME = ""
+_active_gemini_client = None
+
+
+# --- Gemini Adapter (Unchanged) ---
+class GeminiClientAdapter:
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.chat = self.Chat(self)
+
+    class Chat:
+        def __init__(self, parent):
+            self.parent = parent
+            self.completions = self
+
+        def create(self, model, messages, stream=False, **kwargs):
+            usage_tracker.prepare_for_request()
+            config_params = {"temperature": kwargs.get("temperature")}
+            filtered_config_params = {k: v for k, v in config_params.items() if v is not None}
+            generation_config = GenerationConfig(**filtered_config_params)
+            safety_settings = {
+                'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE', 'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+                'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE', 'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+            }
+            
+            # --- MODIFIED: Reworked message processing for multimodal support ---
+            gemini_messages = []
+            system_prompt = ""
+            for msg in messages:
+                if msg['role'] == 'system':
+                    system_prompt += msg['content'] + "\n\n"
+                    continue
+                
+                role = 'model' if msg['role'] == 'assistant' else 'user'
+                content_parts = []
+                
+                # Prepend system prompt to the first user message
+                if role == 'user' and system_prompt:
+                    content_parts.append(system_prompt)
+                    system_prompt = "" # Ensure it's only added once
+
+                # Handle different content types (string or list for multimodal)
+                raw_content = msg.get('content', '')
+                if isinstance(raw_content, list):
+                    for part in raw_content:
+                        if isinstance(part, str):
+                            content_parts.append(part)
+                        elif isinstance(part, dict) and 'image_path' in part:
+                            if PIL:
+                                try:
+                                    # --- FIXED: Use a 'with' statement to guarantee file handle is closed ---
+                                    with PIL.Image.open(part['image_path']) as img:
+                                        content_parts.append(img)
+                                except Exception as e:
+                                    log_message("ERROR", f"Failed to open image {part['image_path']}: {e}")
+                            else:
+                                log_message("ERROR", "Pillow is not installed, cannot process image.")
+
+                else: # It's a string
+                    content_parts.append(raw_content)
+
+                gemini_messages.append({'role': role, 'parts': content_parts})
+            
+            if stream:
+                response_stream = _active_gemini_client.generate_content(
+                    gemini_messages, stream=True, generation_config=generation_config, safety_settings=safety_settings)
+                result = self.parent._stream_generator(response_stream)
+            else:
+                response = _active_gemini_client.generate_content(
+                    gemini_messages, generation_config=generation_config, safety_settings=safety_settings)
+                result = self.parent._format_non_stream_response(response)
+            
+            usage_tracker.track_successful_request()
+            return result
+
+    def _stream_generator(self, gemini_stream):
+        class FakeDelta:
+            def __init__(self, content): self.content = content
+        class FakeChoice:
+            def __init__(self, content): self.delta = FakeDelta(content)
+        class FakeStreamChunk:
+            def __init__(self, content): self.choices = [FakeChoice(content)]
+        for chunk in gemini_stream:
+            if chunk.parts:
+                yield FakeStreamChunk(chunk.text)
+
+    def _format_non_stream_response(self, gemini_response):
+        class FakeMessage:
+            def __init__(self, content): self.content = content
+        class FakeChoice:
+            def __init__(self, content): self.message = FakeMessage(content)
+        class FakeCompletion:
+            def __init__(self, text): self.choices = [FakeChoice(text)]
+        try:
+            return FakeCompletion(gemini_response.text)
+        except ValueError:
+            return FakeCompletion("[Response blocked by API safety filters]")
+
+# --- Function to initialize or re-initialize the Gemini client ---
+def initialize_gemini_client(key_index: int):
+    global _active_gemini_client, current_key_index, LLM_PROVIDER_NAME, MODEL_NAME
+    current_key_index = key_index
+    active_key = GEMINI_API_KEYS[current_key_index]
+    if not active_key or "YOUR_" in active_key:
+        print(f"\n\033[91mConfiguration Error: Gemini API Key at index {current_key_index} is not set.\033[0m")
+        sys.exit(1)
+    genai.configure(api_key=active_key)
+    MODEL_NAME = "gemini-2.5-flash"
+    _active_gemini_client = genai.GenerativeModel(MODEL_NAME)
+    LLM_PROVIDER_NAME = "Google Gemini (Rotated)"
+
+
+# --- MODIFIED: Unified async function for image generation, always using GapGPT ---
+async def generate_image(prompt: str):
+    """
+    Generates an image using the GapGPT DALL-E 3 provider, regardless of the
+    primary LLM_MODE setting.
+    """
+    log_message("ROUTING", f"Routing image generation to GapGPT for prompt: '{prompt}'")
+    unique_filename = f"{uuid.uuid4()}.png"
+    save_path = os.path.join(GENERATED_IMAGES_DIR, unique_filename)
+
+    # Always use a dedicated async client for GapGPT image generation
+    gapgpt_client = openai.AsyncOpenAI(
+        base_url='https://api.gapgpt.app/v1',
+        api_key=GAPGPT_API_KEY
+    )
+
+    if not httpx:
+        return {"success": False, "error": "The 'httpx' library is required for image generation."}
+
+    try:
+        # Asynchronously call the GapGPT API
+        response = await gapgpt_client.images.generate(
+            model="dall-e-2",
+            prompt=prompt,
+            n=1,
+            size="1024x1024",
+            response_format="url"
+        )
+        image_url = response.data[0].url
+        log_message("TOOL_RESULT", f"GapGPT returned image URL: {image_url}")
+
+        # Asynchronously download the image from the URL
+        async with httpx.AsyncClient() as http_client:
+            image_response = await http_client.get(image_url, timeout=30)
+            image_response.raise_for_status()
+            with open(save_path, "wb") as f:
+                f.write(image_response.content)
+
+        log_message("TOOL_RESULT", f"Image successfully saved to '{save_path}'")
+        return {"success": True, "unique_filename": unique_filename, "prompt": prompt}
+
+    except Exception as e:
+        log_message("ERROR", f"Image generation via GapGPT failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# --- Main Client Logic ---
+if LLM_MODE == 'gemini':
+    # This block handles all Gemini-specific setup.
+    initialize_gemini_client(0) 
+    client = GeminiClientAdapter(MODEL_NAME)
+    usage_tracker = ApiUsageTracker(LLM_PROVIDER_NAME, GEMINI_API_KEYS, initialize_gemini_client)
+else:
+    # This block handles all non-Gemini (OpenAI-compatible) setups.
+    if LLM_MODE == 'local':
+        client = openai.OpenAI(base_url="http://127.0.0.1:5000/v1", api_key="not-needed")
+        MODEL_NAME = "DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf"
+        LLM_PROVIDER_NAME = "Local"
+    elif LLM_MODE == 'gapgpt':
+        client = openai.OpenAI(base_url='https://api.gapgpt.app/v1', api_key=GAPGPT_API_KEY)
+        MODEL_NAME = "gpt-4o-mini"
+        LLM_PROVIDER_NAME = "GapGPT"
+    elif LLM_MODE == 'openai':
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        MODEL_NAME = "gpt-4o"
+        LLM_PROVIDER_NAME = "OpenAI"
+    else:
+        print(f"\n\033[91mConfiguration Error: Invalid LLM_MODE '{LLM_MODE}'.\033[0m")
+        sys.exit(1)
+
+    # Simple wrapper for these clients to log a basic message
+    def create_wrapper(original_create_func):
+        def wrapped_create(*args, **kwargs):
+            log_message("ROUTING", f"API Usage -- Provider: {LLM_PROVIDER_NAME}")
+            return original_create_func(*args, **kwargs)
+        return wrapped_create
+
+    client.chat.completions.create = create_wrapper(client.chat.completions.create)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\llm\prompts.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\llm\prompts.py
+from tools.tool_manager import TOOL_REGISTRY
+
+# This persona is injected into every final response.
+AI_PERSONA_PROMPT = """You are AI Sentinel (Agent). You were created by a developer known as 'Amir'.
+   You are an independent AI assistant, not a product of OpenAI.
+   Your purpose is to assist the user by running tools and providing clear, helpful information based on their results.
+   ---
+   """
+
+def get_tool_selection_prompt() -> str:
+    """
+    Provides the AI with clear instructions on its available tools and requires it to
+    provide its reasoning process.
+    """
+    return """You are an expert at creating tool-use plans to fulfill a user's request.
+
+    
+--- GUIDING PRINCIPLES ---
+1.  **Multi-Step Planning:** For complex requests (e.g., "write code and then run it"), create a sequence of actions in the JSON array. The actions will be executed in the order you provide.
+2.  **Contextual Awareness:** Pay close attention to the results of previous tool executions in the conversation history. If a file was just created, saved, or mentioned (e.g., a screenshot was taken), and the user's next message is ambiguous (e.g., "analyze it", "what does it say?"), assume they are referring to that file. Use the filename provided in the tool result for your next action.
+3.  **Direct Output Tools:** Some tools like `list_files` are designed for direct output. When you use these tools, your plan should usually consist of only that single action, as the tool's raw output is the final answer the user wants to see. Do not try to summarize the output of these tools with a `conversation` action.
+4.  **Goal-Oriented:** Your primary goal is to successfully complete the user's request using the available tools.
+5.  **Information Gathering:** If you lack necessary information (e.g., a command, a filename, a PID), the first step in your plan should be to use the `web_search` tool to find it. Do not guess. **IMPORTANT** USE WEB SEARCH WHEN YOU ACTUALLY DON'T THE ANSWER FOR THAT, NOT WHEN YOU THINK YOU KNOW IT. This is to avoid making mistakes.
+6.  **Execution:** After gathering information with `web_search`, your next step MUST be to use that information with an appropriate tool (e.g., `execute_command`). Do not get stuck in a loop of searching. If the user asks you to proceed after you've presented search results, it's a command to ACT on those results.
+7.  **Planning on Failure:** If a tool fails (e.g., `execute_command` returns an error), do not give up immediately. Analyze the error message. Use `web_search` to understand the error and find a different command or approach. Then, try the new approach.
+8.  **Trust The User:** If a tool reports success (e.g., "command executed successfully") but the user states that the desired outcome did not happen (e.g., "it's not open," "that didn't work"), TRUST THE USER. Do not repeat the exact same failed command. Formulate a new plan, such as trying a different command or searching for alternative solutions.
+9.  **Tool Preference:** Your primary function is to use tools. Do not claim you "cannot" do something if a tool exists for that purpose (e.g., `execute_command` for running programs). Always prefer using a tool over apologizing.
+10. **Code Generation:** When a user asks you to write, create, or provide code, ALWAYS use the `conversation` action. Present the code directly in a markdown code block within your response. DO NOT use the `write_text_to_file` tool unless the user explicitly asks you to save the code to a file.
+
+--- AVAILABLE ACTIONS ---
+1.  `terminate_process_by_name`: Terminates (kills) all running processes that match a given executable name.
+    - Example: User says "close discord" -> `[{"action": "terminate_process_by_name", "parameters": {"process_name": "Discord.exe"}}]`
+    - Parameters: `{"process_name": "string"}`
+2.  `get_process_details`: Gets detailed information about a specific process by its PID.
+    - Parameters: `{"pid": integer}`
+3.  `list_network_connections`: Lists active network connections to see which programs are communicating online.
+    - Parameters: `{}`
+4.  `list_running_processes`: Provides a summary of running processes, or a detailed list saved to a file.
+    - Parameters: `{"detailed": false}`
+5.  `execute_command`: Executes a shell command. THIS IS HOW YOU RUN PROGRAMS, DELETE FILES (del), AND INTERACT WITH THE OS. DO NOT use this to write files.
+    - Example: `[{"action": "execute_command", "parameters": {"command": "taskkill /F /PID 1234"}}]`
+    - Parameters: `{"command": "exact_command_to_run"}`
+6.  `save_uploaded_file`: Moves a file already uploaded by the user to a permanent location.
+    - Parameters: `{"temporary_filename": "string", "destination_path": "string"}`
+7.  `write_text_to_file`: Writes or saves text or code to a file. Use this to create new files or overwrite existing ones.
+    - Example: `[{"action": "write_text_to_file", "parameters": {"filepath": "D:\\my_code\\game.py", "content": "import pygame..."}}]`
+    - Parameters: `{"filepath": "path/to/file", "content": "text_content"}`
+8.  `analyze_file`: Reads a file's content so you can analyze it, summarize it, or answer questions about it.
+    - Parameters: `{"filepath": "path/to/file"}`
+9.  `send_file`: Prepares a file or folder for download by the user.
+    - Parameters: `{"filepath": "path/to/file_or_folder"}`
+10. `list_files`: Lists files in a directory. Handles shortcuts like 'desktop' or 'documents' and env vars like '%USERPROFILE%'. The result is shown directly to the user.
+    - Example: User says "list my desktop" -> `[{"action": "list_files", "parameters": {"directory": "desktop"}}]`
+    - Parameters: `{"directory": "path/to/directory", "show_details": false}`
+11. `read_file`: Reads and displays the raw content of a text file. For analysis, prefer `analyze_file`.
+    - Parameters: `{"filepath": "path/to/file"}`
+12. `web_search`: Searches the web for information. Use this to find information or figure out complex commands.
+    - Parameters: `{"query": "search_query"}`
+13. `get_public_ip`: Retrieves the public IP address.
+    - Parameters: `{}`
+14. `get_current_datetime`: Gets the current date and time.
+    - Parameters: `{}`
+15. `get_system_info`: Retrieves system and hardware information.
+    - Parameters: `{}`
+16. `generate_image`: Creates and generates a new image based on a detailed user description. Use this ONLY when the user explicitly asks to 'generate', 'create', or 'draw' an image.
+    - Parameters: `{"prompt": "A detailed description of the image to generate"}`
+17. `take_screenshot`: Captures a screenshot of the entire screen after an optional delay in seconds.
+    - Example: User says "take a screenshot in 5 seconds" -> `[{"action": "take_screenshot", "parameters": {"delay": 5}}]`
+    - Parameters: `{"delay": integer}`
+18. `conversation`: Use ONLY for greetings, general chat, or when no other tool is appropriate.
+    - Parameters: `{}`
+--- END OF INSTRUCTIONS ---
+Analyze the user's request and provide your response in the specified format (<thought> block followed by the raw JSON array).
+"""
+
+def get_final_response_prompt(action_name: str, params: dict, action_result: str) -> str:
+    """
+    Generates the final system prompt by fetching the template from the tool
+    and injecting the AI persona.
+    """
+    base_prompt = AI_PERSONA_PROMPT
+
+    if "Error:" in action_result:
+        error_template = """The tool '{action_name}' with parameters {params} failed.
+Explain the error to the user in simple terms and suggest what they could try next.
+
+Technical Error:
+{action_result}
+"""
+        base_prompt += error_template
+    else:
+        tool_info = TOOL_REGISTRY.get(action_name, {})
+        template = tool_info.get("final_prompt_template", "Present this result clearly: {action_result}")
+        base_prompt += template
+
+    # The **params allows templates to use placeholders like {command} or {query} directly.
+    return base_prompt.format(action_name=action_name, params=params, action_result=action_result, **params)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\index.html
+<!-- C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sentinel</title>
+    <!-- --- MODIFIED: Link to a custom favicon file in the static directory --- -->
+    <!-- To use your own icon, place a file (e.g., favicon.png) in the 'static' folder -->
+    <!-- and ensure the href attribute below points to it. -->
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono&family=Source+Code+Pro&family=Fira+Code&display=swap" rel="stylesheet">
+    
+    <!-- --- MODIFIED: Replaced single style.css with modular stylesheets --- -->
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/layout.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <link rel="stylesheet" href="/static/css/settings.css">
+    
+    <link id="theme-stylesheet" rel="stylesheet" href="/static/themes/dark.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <!-- --- ADDED: Syntax highlighting library and theme --- -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+    <canvas id="matrix-canvas"></canvas>
+
+    <div class="app-layout">
+        <nav class="app-sidebar">
+            <div class="sidebar-header">
+                <i class="fa-solid fa-shield-halved"></i>
+            </div>
+            <div class="sidebar-buttons">
+                <button class="sidebar-button active" data-view="chat" title="Chat">
+                    <i class="fa-solid fa-comments"></i>
+                </button>
+                <button class="sidebar-button" data-view="dashboard" title="Dashboard">
+                    <i class="fa-solid fa-gauge-high"></i>
+                </button>
+                <button class="sidebar-button" data-view="settings" title="Settings">
+                    <i class="fa-solid fa-gear"></i>
+                </button>
+            </div>
+            <!-- ADDED: Logout button at the bottom of the sidebar -->
+            <div class="sidebar-footer">
+                 <button id="logout-button" class="sidebar-button" title="Logout">
+                    <i class="fa-solid fa-right-from-bracket"></i>
+                </button>
+            </div>
+        </nav>
+
+        <main class="app-content">
+            <!-- VIEW 1: Chat -->
+            <div id="chat-view" class="view active">
+                <div class="header"><h1>AI Sentinel</h1></div>
+                <div id="welcome-screen"><div class="welcome-message"></div></div>
+                <div id="chat-window" class="chat-window"></div>
+                <div class="input-area-wrapper">
+                    <div id="file-attachment-preview" style="display: none;"></div>
+                    <div id="suggestion-chips"></div>
+                    <div class="input-area">
+                        <input type="file" id="file-input" style="display: none;" />
+                        <div id="attach-flyout-container">
+                            <button id="attach-file-button" title="Attach File"><i class="fa-solid fa-paperclip"></i></button>
+                            <div id="attach-options">
+                                <button id="upload-for-analyze-button"><i class="fa-solid fa-magnifying-glass-chart"></i> Analyze File</button>
+                                <button id="upload-for-save-button"><i class="fa-solid fa-floppy-disk"></i> Save File</button>
+                                <button id="upload-for-share-button"><i class="fa-solid fa-share-from-square"></i> Share File</button>
+                            </div>
+                        </div>
+                        <input type="text" id="message-input" placeholder="Ask the sentinel..." autocomplete="off">
+                        <button id="send-button" title="Send Message"><i class="fa-solid fa-paper-plane"></i></button>
+                        <button id="stop-button" title="Stop Generation" style="display: none;"><i class="fa-solid fa-stop"></i></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW 2: Dashboard -->
+            <div id="dashboard-view" class="view">
+                <div class="header"><h1>Dashboard</h1></div>
+                <div class="view-content">
+                    <nav class="dashboard-nav">
+                        <button class="dashboard-tab active" data-tab="overview"><i class="fa-solid fa-circle-nodes"></i> Overview</button>
+                        <button class="dashboard-tab" data-tab="processes"><i class="fa-solid fa-tasks"></i> Processes</button>
+                        <button class="dashboard-tab" data-tab="performance"><i class="fa-solid fa-chart-line"></i> Performance</button>
+                        <button class="dashboard-tab" data-tab="system-info"><i class="fa-solid fa-server"></i> System Info</button>
+                    </nav>
+                    <main class="dashboard-main">
+                        <div id="tab-overview" class="tab-pane active">
+                            <h3>Real-time Overview</h3>
+                            <div class="overview-grid">
+                                <div id="overview-cpu" class="metric-card"></div>
+                                <div id="overview-ram" class="metric-card"></div>
+                                <div id="overview-network" class="metric-card"></div>
+                                <div id="overview-gpu-container" class="metric-card-container"></div>
+                            </div>
+                        </div>
+                        <div id="tab-processes" class="tab-pane">
+                            <div id="process-list-container">
+                                <table class="process-table">
+                                    <thead><tr><th>PID</th><th>Name</th><th>CPU %</th><th>Memory (MB)</th></tr></thead>
+                                    <tbody id="process-list-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div id="tab-performance" class="tab-pane">
+                            <h3>Performance Details</h3>
+                            <div class="performance-grid">
+                                <div class="metric-card">
+                                    <h4>CPU Cores</h4>
+                                    <div id="cpu-cores-container" class="cpu-cores-grid"></div>
+                                 </div>
+                                <div class="metric-card">
+                                    <h4>Disk Drives</h4>
+                                    <div id="disk-metrics-container"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="tab-system-info" class="tab-pane">
+                            <h3>System Information</h3>
+                            <ul id="system-info-list" class="info-list"></ul>
+                        </div>
+                    </main>
+                </div>
+            </div>
+
+            <!-- VIEW 3: Settings -->
+            <div id="settings-view" class="view">
+                <div class="header"><h1>Settings</h1></div>
+                <div class="view-content centered">
+                    <div class="settings-container">
+                        <div class="setting-item"><label for="enable-history">Enable Conversation History</label><label class="switch"><input type="checkbox" id="enable-history"><span class="slider round"></span></label></div>
+                        <div class="setting-item"><label for="history-length">Memory Length</label><div class="slider-container"><span>2</span><input type="range" id="history-length" min="2" max="20" step="2" value="10"><span>20</span></div><span id="history-length-value">10 messages</span></div>
+                        <div class="setting-item"><label for="ui-scale">UI Scale</label><div class="slider-container"><span>80%</span><input type="range" id="ui-scale" min="80" max="120" step="5" value="100"><span>120%</span></div><span id="ui-scale-value">100%</span></div>
+                        <div class="setting-item"><label for="font-selector">Chat Font</label><select id="font-selector"><option value="'Inter', sans-serif">Inter (Default)</option><option value="'Roboto Mono', monospace">Roboto Mono</option><option value="'Source Code Pro', monospace">Source Code Pro</option><option value="'Fira Code', monospace">Fira Code</option><option value="Arial, sans-serif">Arial</option></select></div>
+                        <div class="setting-item"><label>Theme</label><div class="theme-selector" id="theme-selector"><button data-theme="dark" class="active">Dark</button><button data-theme="light">Light</button><button data-theme="matrix">Matrix</button></div></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div id="image-lightbox" class="lightbox-overlay">
+        <span class="lightbox-close">×</span>
+        <img class="lightbox-content" id="lightbox-img">
+    </div>
+
+    <!-- --- REMOVED: The markdown-it library is no longer needed. --- -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="/static/js/app.js" type="module"></script>
+</body>
+</html>
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\login.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sentinel - Login</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="stylesheet" href="/static/css/login.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-box">
+            <div class="login-header">
+                <i class="fa-solid fa-shield-halved"></i>
+                <h1>AI Sentinel</h1>
+            </div>
+            <form id="login-form">
+                <div class="input-group">
+                    <i class="fa-solid fa-user"></i>
+                    <input type="text" id="username" placeholder="Username" required>
+                </div>
+                <div class="input-group">
+                    <i class="fa-solid fa-lock"></i>
+                    <input type="password" id="password" placeholder="Password" required>
+                </div>
+                <button type="submit" class="login-button">Authenticate</button>
+                 <p class="login-note">Note: Any username/password will work. This is a visual demo.</p>
+            </form>
+        </div>
+    </div>
+    <script src="/static/js/login.js"></script>
+</body>
+</html>
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\desktop_actions.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\desktop_actions.py
+import os
+import time
+import uuid
+from .tool_manager import tool
+
+# Handle the optional pyautogui import to prevent crashes if it's not installed.
+try:
+    import pyautogui
+    PYAUTOGUI_AVAILABLE = True
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
+
+# Use the same directory as generated images for consistency and easy serving.
+GENERATED_IMAGES_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_generated_images"))
+
+# This tool's result is handled specially by the agent, so a default prompt is fine.
+@tool()
+def take_screenshot(delay: int = 0):
+    """
+    Captures a screenshot of the entire screen after an optional delay in seconds.
+    The screenshot is then displayed to the user in the chat.
+    """
+    if not PYAUTOGUI_AVAILABLE:
+        return "Error: The 'PyAutoGUI' library is required to take screenshots. Please run 'pip install pyautogui'."
+
+    try:
+        if not os.path.exists(GENERATED_IMAGES_DIR):
+            os.makedirs(GENERATED_IMAGES_DIR)
+            
+        if delay > 0:
+            # Give the user time to prepare their screen before capturing.
+            time.sleep(delay)
+
+        unique_filename = f"screenshot_{uuid.uuid4()}.png"
+        save_path = os.path.join(GENERATED_IMAGES_DIR, unique_filename)
+
+        # Take the screenshot and save it to the designated path.
+        screenshot = pyautogui.screenshot()
+        screenshot.save(save_path)
+
+        # Return a special dictionary for the agent to identify and handle.
+        # This allows us to bypass standard text formatting and use a custom UI component.
+        return {"screenshot_taken": True, "unique_filename": unique_filename}
+    except Exception as e:
+        return f"Error: Failed to take screenshot. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\file_io.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\file_io.py
+import os
+import shutil
+import uuid
+import re
+from .tool_manager import tool
+from .file_system import resolve_path
+
+# --- ADDED: Try to import Pillow and PyMuPDF for file analysis ---
+try:
+    from PIL import Image
+    IMAGE_AVAILABLE = True
+except ImportError:
+    IMAGE_AVAILABLE = False
+
+try:
+    import fitz  # PyMuPDF
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+
+# --- FIXED: Define all necessary directory constants within this file. ---
+DOWNLOAD_STAGING_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_downloads"))
+UPLOAD_STAGING_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_uploads"))
+GENERATED_IMAGES_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_generated_images"))
+
+
+@tool()
+def analyze_file(filepath: str):
+    """
+    Reads a file's content for analysis. Handles text files, PDFs, and images.
+    For images/PDFs, it extracts text content. For plain text, it returns the content.
+    """
+    uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_')
+    
+    # --- MODIFIED: More robust path finding for uploaded/generated files ---
+    # Check if the filepath is a temporary file from uploads or generations
+    is_temp_file = uuid_pattern.match(filepath) or "screenshot_" in filepath
+    if is_temp_file:
+        # Check all possible staging directories
+        path_in_uploads = os.path.join(UPLOAD_STAGING_DIR, filepath)
+        path_in_generated = os.path.join(GENERATED_IMAGES_DIR, filepath)
+        if os.path.exists(path_in_uploads):
+            resolved_filepath = path_in_uploads
+        elif os.path.exists(path_in_generated):
+            resolved_filepath = path_in_generated
+        else:
+            # If not found in staging, it might be a regular path that happens to match the pattern
+            resolved_filepath = resolve_path(filepath)
+    else:
+        resolved_filepath = resolve_path(filepath)
+
+    if not os.path.exists(resolved_filepath) or os.path.isdir(resolved_filepath):
+        return f"Error: File not found or is a directory: {resolved_filepath}"
+
+    _, extension = os.path.splitext(filepath.lower())
+    image_extensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
+    text_extensions = [
+        '.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.py', '.c', '.cpp', '.h',
+        '.java', '.cs', '.php', '.rb', '.go', '.rs', '.swift', '.kt', '.sh', '.bat', '.ps1',
+        '.csv', '.tsv', '.log'
+    ]
+
+    # --- MODIFIED: Handle different file types including PDF ---
+    if extension in image_extensions:
+        if not IMAGE_AVAILABLE:
+            return "Error: The Pillow library is required for image analysis but is not installed. Please run 'pip install Pillow'."
+        # For images, return a special dictionary for the agent to process with a vision model
+        return {"type": "image_analysis", "path": resolved_filepath}
+    
+    # --- ADDED: PDF analysis capability ---
+    elif extension == '.pdf':
+        if not PDF_AVAILABLE:
+            return "Error: The PyMuPDF library is required for PDF analysis. Please run 'pip install PyMuPDF'."
+        try:
+            doc = fitz.open(resolved_filepath)
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+            note = "\n... (Note: Only the first 100,000 characters are being analyzed)" if len(text) > 100000 else ""
+            return f"PDF Content:\n{text[:100000]}{note}"
+        except Exception as e:
+            return f"Error: Error reading PDF file '{resolved_filepath}'. Details: {e}"
+
+    elif extension in text_extensions:
+        try:
+            with open(resolved_filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read(100000)
+                note = "\n... (Note: Only the first 100,000 characters are being analyzed)" if len(content) == 100000 else ""
+                return f"File Content:\n{content}{note}"
+        except Exception as e:
+            return f"Error: Error reading text file '{resolved_filepath}'. Details: {e}"
+    else:
+        return f"Error: File type '{extension}' is not supported for analysis. Supported types are images, PDFs, and plain text files."
+
+
+save_prompt = "Confirm to the user that the file has been successfully saved to the specified location.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=save_prompt)
+def save_uploaded_file(temporary_filename: str, destination_path: str):
+    """Moves a user-uploaded file from a temporary area to a permanent location."""
+    try:
+        temp_file_path = os.path.join(UPLOAD_STAGING_DIR, temporary_filename)
+        if not os.path.abspath(temp_file_path).startswith(UPLOAD_STAGING_DIR):
+            return f"Error: Invalid temporary filename '{temporary_filename}'."
+        if not os.path.exists(temp_file_path):
+            return f"Error: Temp file '{temporary_filename}' does not exist."
+        resolved_destination = resolve_path(destination_path)
+        if os.path.isdir(resolved_destination):
+            original_filename = "_".join(temporary_filename.split('_')[1:])
+            resolved_destination = os.path.join(resolved_destination, original_filename)
+        os.makedirs(os.path.dirname(resolved_destination), exist_ok=True)
+        shutil.move(temp_file_path, resolved_destination)
+        return f"Success: File has been saved to '{resolved_destination}'."
+    except Exception as e:
+        return f"Error saving file: {e}"
+
+@tool()
+def send_file(filepath: str):
+    """Prepares a file or folder for download by the user."""
+    try:
+        resolved_path = resolve_path(filepath)
+        if not os.path.exists(resolved_path):
+            return f"Error: The path '{resolved_path}' does not exist."
+        
+        original_basename = os.path.basename(resolved_path)
+        unique_basename = f"{uuid.uuid4()}_{original_basename}"
+
+        if os.path.isdir(resolved_path):
+            zip_path_base = os.path.join(DOWNLOAD_STAGING_DIR, unique_basename)
+            shutil.make_archive(zip_path_base, 'zip', resolved_path)
+            target_filename = f"{unique_basename}.zip"
+        elif os.path.isfile(resolved_path):
+            target_filename = unique_basename
+            shutil.copy(resolved_path, os.path.join(DOWNLOAD_STAGING_DIR, target_filename))
+        else:
+            return f"Error: The path '{resolved_path}' is not a valid file or directory."
+        
+        return {
+            "file_sent": True,
+            "original_filename": f"{original_basename}.zip" if os.path.isdir(resolved_path) else original_basename,
+            "unique_filename": target_filename
+        }
+    except Exception as e:
+        return f"Error executing send_file: {e}"
+
+write_file_prompt = "You have successfully written the content to the file `{filepath}`. Inform the user of this success."
+@tool(final_prompt=write_file_prompt)
+def write_text_to_file(filepath: str, content: str):
+    """
+    Writes or saves given text content to a specified file.
+    This will create the file if it doesn't exist, and overwrite it if it does.
+    """
+    try:
+        resolved_filepath = resolve_path(filepath)
+        
+        if '..' in resolved_filepath:
+            return f"Error: Invalid path. Path traversal is not allowed."
+
+        os.makedirs(os.path.dirname(resolved_filepath), exist_ok=True)
+        
+        with open(resolved_filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return f"Success: Content was written to {resolved_filepath}"
+    except Exception as e:
+        return f"Error: Could not write to file '{filepath}'. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\file_system.py
+import os
+import datetime
+from .tool_manager import tool
+
+def resolve_path(path_str: str) -> str:
+    """Resolves a path string by handling env vars, shortcuts, and relative paths."""
+    path_str = os.path.expanduser(os.path.expandvars(path_str))
+    if os.path.isabs(path_str):
+        return os.path.normpath(path_str)
+    path_str = path_str.replace('\\', '/')
+    parts = path_str.split('/')
+    first_part = parts[0].lower()
+    home = os.path.expanduser('~')
+    special_paths = {
+        "desktop": os.path.join(home, "Desktop"),
+        "documents": os.path.join(home, "Documents"),
+        "downloads": os.path.join(home, "Downloads"),
+        "music": os.path.join(home, "Music"),
+        "pictures": os.path.join(home, "Pictures"),
+        "videos": os.path.join(home, "Videos"),
+    }
+    if first_part in special_paths:
+        base_path = special_paths[first_part]
+        remaining_parts = parts[1:]
+        return os.path.join(base_path, *remaining_parts) if remaining_parts else base_path
+    return os.path.abspath(os.path.normpath(path_str))
+
+# list_files is bypassed by the agent, so it does not need a final_prompt.
+@tool()
+def list_files(directory: str = ".", show_details: bool = False):
+    """Lists files and folders in a directory. show_details=True provides a table with file types and sizes."""
+    try:
+        resolved_directory = resolve_path(directory)
+        if not os.path.exists(resolved_directory) or not os.path.isdir(resolved_directory):
+            return f"Error: Directory '{resolved_directory}' not found."
+        
+        files_list = os.listdir(resolved_directory)
+        
+        if not show_details:
+            # --- MODIFIED: Use the standard '*' list marker for better compatibility ---
+            header = f"**Files in `{os.path.abspath(resolved_directory)}`:**\n\n"
+            return header + "\n".join(f"* `{f}`" for f in files_list)
+        else:
+            header = [
+                f"**Detailed file listing for `{os.path.abspath(resolved_directory)}`:**",
+                "```",
+                f"{'Filename':<40} {'Type':<10} {'Creation Date':<25} {'Size'}",
+                f"{'-'*40:<40} {'-'*10:<10} {'-'*25:<25} {'-'*15}"
+            ]
+            output_lines = []
+            for filename in files_list:
+                try:
+                    full_path = os.path.join(resolved_directory, filename)
+                    stats = os.stat(full_path)
+                    creation_time = datetime.datetime.fromtimestamp(stats.st_ctime).strftime('%Y-%m-%d %H:%M:%S')
+                    display_name = (filename[:37] + '...') if len(filename) > 40 else filename
+                    
+                    if os.path.isdir(full_path):
+                        file_type = "<DIR>"
+                        size_str = "" # Directories don't have a simple size, so leave it blank
+                    else:
+                        file_type = "File"
+                        size_kb = stats.st_size / 1024
+                        size_str = f"{size_kb:>,.2f} KB"
+
+                    output_lines.append(f"{display_name:<40} {file_type:<10} {creation_time:<25} {size_str}")
+
+                except OSError:
+                    output_lines.append(f"{filename:<40} {'<Error>':<10} {'<Error reading stats>':<25} {'N/A'}")
+
+            return "\n".join(header + output_lines + ["```"])
+
+    except Exception as e:
+        return f"Error: Failed to list files. Details: {e}"
+
+read_file_prompt = "The `read_file` tool has already formatted the file content for display. Present this output directly to the user without adding extra conversational text.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=read_file_prompt)
+def read_file(filepath: str):
+    """Reads the first 5000 characters of a text file."""
+    resolved_filepath = resolve_path(filepath)
+    if not os.path.exists(resolved_filepath) or os.path.isdir(resolved_filepath):
+        return f"Error: File not found or is a directory: {resolved_filepath}"
+    try:
+        with open(resolved_filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read(5000)
+            note = "\n... (file is longer than 5000 characters)" if len(content) == 5000 else ""
+            return f"**Content of `{resolved_filepath}`:**\n```\n{content}\n```\n{note}"
+    except Exception as e:
+        return f"Error: Error reading file '{resolved_filepath}'. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\get_datetime.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\get_datetime.py
+import datetime
+from .tool_manager import tool
+
+datetime_prompt = "The tool returned the current date and time. Present this exact information to the user in a friendly sentence.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=datetime_prompt)
+def get_current_datetime():
+    """Returns the current date and time."""
+    now = datetime.datetime.now()
+    return now.strftime("It is %A, %B %d, %Y at %I:%M %p.")
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\image_generation.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\image_generation.py
+from .tool_manager import tool
+
+# This tool's result is handled specially by the agent.
+# The agent will intercept this tool call and use a dedicated image generation model.
+# Therefore, it does not need a final_prompt.
+@tool()
+def generate_image(prompt: str):
+    """
+    Creates and generates a new image based on a detailed user description.
+    Use this tool ONLY when the user explicitly asks to 'generate', 'create', or 'draw' an image.
+    Do not use it for analyzing or finding existing images.
+    The prompt should be descriptive and detailed for best results.
+    """
+    # This tool is a trigger. It doesn't do anything on its own.
+    # The agent's `execute_action` method will see this tool name
+    # and initiate the image generation workflow.
+    # The prompt is passed directly to the image generation model.
+    return f"Image generation triggered for prompt: {prompt}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\network_info.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\network_info.py
+import requests
+import psutil
+from .tool_manager import tool
+
+ip_prompt = "The tool returned the user's public IP address. State it clearly to the user, for example: \"Your public IP address is: {action_result}\"."
+@tool(final_prompt=ip_prompt)
+def get_public_ip():
+    """Retrieves the user's public IP address."""
+    try:
+        response = requests.get('https://api.ipify.org', timeout=5)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error: Could not fetch public IP. Details: {e}"
+
+network_connections_prompt = "You have retrieved a list of active network connections. Present this information to the user in a clean, readable format, perhaps as a Markdown table or a clear list. Highlight any interesting or unusual connections.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=network_connections_prompt)
+def list_network_connections():
+    """Lists active network connections, showing the process, local/remote addresses, and status."""
+    try:
+        connections = psutil.net_connections(kind='inet')
+        output = ["**Active Network Connections:**\n```"]
+        output.append(f"{'PID':<8} {'Process Name':<25} {'Local Address':<25} {'Remote Address':<25} {'Status'}")
+        output.append("-" * 90)
+        
+        for conn in connections:
+            if conn.status != 'ESTABLISHED' or not conn.raddr:
+                continue
+            
+            try:
+                proc_name = psutil.Process(conn.pid).name() if conn.pid else "N/A"
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                proc_name = "N/A"
+
+            local_addr = f"{conn.laddr.ip}:{conn.laddr.port}"
+            remote_addr = f"{conn.raddr.ip}:{conn.raddr.port}"
+            
+            output.append(f"{conn.pid or 'N/A':<8} {proc_name[:24]:<25} {local_addr:<25} {remote_addr:<25} {conn.status}")
+
+        if len(output) <= 3:
+            return "No established network connections found."
+
+        output.append("```")
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error: Could not retrieve network connections. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\system_actions.py
+
+import subprocess
+import os
+from .tool_manager import tool
+
+execute_command_prompt = """You just ran the command: `{command}`.
+- If the command produced text output or an error, summarize the result clearly for the user. Explain any errors and present command output inside a Markdown code block.
+- If the command seems to have launched an application successfully (e.g., Return Code 0 and no output), simply confirm this to the user.
+
+Tool Result:
+{action_result}
+"""
+@tool(final_prompt=execute_command_prompt)
+def execute_command(command: str):
+    """
+    Executes a shell command. It intelligently decides whether to wait for output (for console tools)
+    or to launch and detach (for GUI applications).
+    """
+    if not command:
+        return "Error: Command cannot be empty."
+
+    # --- FINALIZED: This is the robust, hybrid execution model ---
+    
+    # List of commands that are known to be console-based and should always be run in a blocking way
+    # to capture their output. This is crucial for commands that return information or status.
+    blocking_commands = [
+        'dir', 'ls', 'echo', 'set', 'ver', 'whoami', 'getmac', 'systeminfo', 'tasklist',
+        'ipconfig', 'ping', 'tracert', 'netstat', 'nslookup', 'where', 'powershell',
+        'del', 'rm', 'taskkill'
+    ]
+
+    # Check if the command starts with one of our known blocking keywords.
+    is_blocking = any(command.strip().lower().startswith(cmd) for cmd in blocking_commands)
+
+    try:
+        if is_blocking:
+            # For console commands, use subprocess.run to block and capture output.
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False
+            )
+            output = f"Return Code: {result.returncode}\n"
+            if result.stdout:
+                output += f"\n--- Standard Output ---\n{result.stdout.strip()}"
+            if result.stderr:
+                error_prefix = "Error" if result.returncode != 0 else "Warning"
+                output += f"\n--- {error_prefix} (Standard Error) ---\n{result.stderr.strip()}"
+            # Handle the case where a command succeeds but prints nothing, like a successful 'del'
+            if result.returncode == 0 and not result.stdout.strip() and not result.stderr.strip():
+                output += "Command executed successfully with no output."
+            return output.strip()
+        else:
+            # For all other commands, assume it's a GUI or long-running process.
+            # Use Popen to launch it without blocking ("fire-and-forget").
+            creation_flags = subprocess.DETACHED_PROCESS if os.name == 'nt' else 0
+            subprocess.Popen(command, shell=True, creationflags=creation_flags)
+            return f"Success: The application '{command}' was launched. It is now running independently and this tool will not wait for it to close."
+
+    except subprocess.TimeoutExpired:
+        return f"Error: The blocking command '{command}' timed out after 60 seconds."
+    except Exception as e:
+        return f"Error: An unexpected error occurred while executing command '{command}': {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\system_info.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\system_info.py
+import platform
+import psutil
+from .tool_manager import tool
+
+system_info_prompt = "You have retrieved the system information. Present this to the user as a clean, easy-to-read, bulleted list using Markdown for bolding the keys (e.g., **OS:**).\n\nTool Result:\n{action_result}"
+@tool(final_prompt=system_info_prompt)
+def get_system_info():
+    """Retrieves detailed and accurate system and hardware information."""
+    try:
+        mem = psutil.virtual_memory()
+        return (f"**OS:** {platform.system()} {platform.release()} ({platform.version()})\n"
+                f"**Architecture:** {platform.machine()}\n"
+                f"**CPU Model:** {platform.processor()}\n"
+                f"**Physical Cores:** {psutil.cpu_count(logical=False)}\n"
+                f"**Logical Processors:** {psutil.cpu_count(logical=True)}\n"
+                f"**Max CPU Frequency:** {psutil.cpu_freq().max:.2f} Mhz\n"
+                f"**Total RAM:** {round(mem.total / (1024**3), 2)} GB\n"
+                f"**Available RAM:** {round(mem.available / (1024**3), 2)} GB\n"
+                f"**RAM Usage:** {mem.percent}%")
+    except Exception as e:
+        return f"Error: Failed to retrieve system info. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\system_processes.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\system_processes.py
+
+import psutil
+import os
+import uuid # --- ADDED: To create unique filenames ---
+from collections import Counter
+from .tool_manager import tool
+
+DOWNLOAD_STAGING_DIR = os.path.abspath(os.path.join(os.getcwd(), "temp_downloads"))
+
+process_summary_prompt = "You have retrieved a summary of running processes. Present this information clearly to the user, using a bulleted list for the top processes.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=process_summary_prompt)
+def list_running_processes(detailed: bool = False):
+    """Lists running processes. Default is a summary; `detailed=True` saves a full list to a file for download."""
+    try:
+        if detailed:
+            if not os.path.exists(DOWNLOAD_STAGING_DIR): os.makedirs(DOWNLOAD_STAGING_DIR)
+            # --- MODIFIED: Create a unique filename to prevent conflicts ---
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"process_list_{unique_id}.txt"
+            filepath = os.path.join(DOWNLOAD_STAGING_DIR, filename)
+            
+            process_list = list(psutil.process_iter(['pid', 'name', 'username']))
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"--- Full Process List ({len(process_list)} total) ---\n\n")
+                
+                header_line = f"{'PID':<10} {'Name':<45} {'Username'}"
+                underline = f"{'-' * 10} {'-' * 45} {'-' * 20}"
+                f.write(f"{header_line}\n{underline}\n")
+                
+                for proc in process_list:
+                    try:
+                        p_info = proc.info
+                        name = p_info.get('name', 'N/A') or 'N/A'
+                        username = p_info.get('username', 'N/A') or 'N/A'
+                        username_str = str(username) if username is not None else 'N/A'
+                        f.write(f"{p_info['pid']:<10} {(name[:42] + '...') if len(name) > 45 else name:<45} {username_str}\n")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied): continue
+            
+            # --- MODIFIED: Return a structured dictionary for the agent ---
+            return {
+                "file_sent": True,
+                "original_filename": filename,
+                "unique_filename": filename 
+            }
+        else:
+            all_procs = list(psutil.process_iter(['name']))
+            process_counts = Counter(p.info.get('name', 'N/A') for p in all_procs)
+            summary = [f"**System Process Summary:**\n- **Total Processes:** {len(all_procs)}\n", "**Top 10 Most Common Processes:**"]
+            for name, count in process_counts.most_common(10):
+                summary.append(f"- `{name}`: {count} instances")
+            return "\n".join(summary)
+    except Exception as e:
+        return f"Error: Failed to retrieve process list. Details: {e}"
+
+terminate_prompt = "You have attempted to terminate processes. Report the outcome to the user, summarizing which processes were terminated and which, if any, failed.\n\nTool Result:\n{action_result}"
+@tool(final_prompt=terminate_prompt)
+def terminate_process_by_name(process_name: str):
+    """Terminates (kills) all running processes that match the given name (e.g., 'Discord.exe')."""
+    if not process_name:
+        return "Error: Process name cannot be empty."
+    
+    terminated_count = 0
+    failed_pids = []
+    
+    for proc in psutil.process_iter(['pid', 'name']):
+        if proc.name().lower() == process_name.lower():
+            try:
+                p = psutil.Process(proc.info['pid'])
+                p.terminate()
+                terminated_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                failed_pids.append(f"{proc.info['pid']} ({e})")
+                
+    if terminated_count == 0 and not failed_pids:
+        return f"Success: No running processes found with the name '{process_name}'."
+    
+    result_parts = []
+    if terminated_count > 0:
+        result_parts.append(f"Successfully terminated {terminated_count} instance(s) of '{process_name}'.")
+    if failed_pids:
+        result_parts.append(f"Failed to terminate the following process PIDs: {', '.join(failed_pids)}.")
+        
+    return " ".join(result_parts)
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\tool_manager.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\tool_manager.py
+import os
+import pkgutil
+import inspect
+from functools import wraps
+
+TOOL_REGISTRY = {}
+
+def tool(final_prompt: str = None):
+    """
+    A decorator to register a function as a tool. It now accepts an optional
+    final_prompt to define how the tool's output should be formatted.
+    --- FIXED: This decorator now correctly handles both sync and async functions. ---
+    """
+    def decorator(func):
+        tool_name = func.__name__
+        
+        default_final_prompt = f"""You have successfully used the `{tool_name}` tool.
+Present the result to the user in a clear and helpful manner.
+
+Tool Result:
+{{action_result}}
+"""
+        
+        # Determine if the original function is async
+        if inspect.iscoroutinefunction(func):
+            # If it's async, the wrapper must also be async
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                return await func(*args, **kwargs)
+            wrapper = async_wrapper
+        else:
+            # If it's a regular function, the wrapper is also regular
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+            wrapper = sync_wrapper
+        
+        TOOL_REGISTRY[tool_name] = {
+            "function": wrapper,
+            "signature": str(inspect.signature(func)),
+            "docstring": func.__doc__.strip() if func.__doc__ else "No description available.",
+            "final_prompt_template": final_prompt or default_final_prompt
+        }
+        # We return the original function, not the wrapper, to keep its properties intact
+        return func
+    return decorator
+
+def load_tools():
+    """Dynamically imports all modules in the 'tools' package to register the tools."""
+    package_path = os.path.dirname(__file__)
+    for _, name, _ in pkgutil.iter_modules([package_path]):
+        if name != 'tool_manager': # Avoid trying to import itself
+            __import__(f"tools.{name}", fromlist=[""])
+    
+    print(f"Loaded tools: {', '.join(TOOL_REGISTRY.keys())}")
+
+
+def get_tool_descriptions() -> str:
+    """Returns a formatted string of all tool descriptions for the LLM prompt."""
+    descriptions = []
+    for name, info in TOOL_REGISTRY.items():
+        sig = info['signature']
+        doc = info['docstring'].split('\n')[0] # Use only the first line for the prompt
+        desc = f"- `{name}{sig}`: {doc}"
+        descriptions.append(desc)
+    return "\n".join(descriptions)
+
+def get_structured_tool_data() -> list:
+    """Returns a structured list of dictionaries of all tool data for frontend rendering."""
+    structured_list = []
+    for name, info in TOOL_REGISTRY.items():
+        if name == "conversation": continue # Don't show the conversation tool to the user
+        structured_list.append({
+            "name": name,
+            "signature": info['signature'],
+            "description": info['docstring']
+        })
+    return sorted(structured_list, key=lambda x: x['name'])
+
+
+async def execute_tool(name: str, parameters: dict):
+    """Executes a tool by name with given parameters. Supports async and sync tools."""
+    if name not in TOOL_REGISTRY:
+        return f"Error: Tool '{name}' not found."
+    try:
+        func = TOOL_REGISTRY[name]["function"]
+        # Because the wrapper now matches the wrapped function (sync/async),
+        # this inspection and conditional await will work correctly.
+        if inspect.iscoroutinefunction(func):
+            result = await func(**parameters)
+        else:
+            result = func(**parameters)
+        return result
+    except Exception as e:
+        return f"Error executing tool '{name}': {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\wait.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\wait.py
+import time
+from .tool_manager import tool
+
+wait_prompt = "You have successfully waited for {seconds} seconds. You can now proceed with the next step in your plan."
+@tool(final_prompt=wait_prompt)
+def wait(seconds: int):
+    """
+    Pauses the execution for a specified number of seconds.
+    This is crucial for waiting for applications to load after launching them.
+    """
+    if not isinstance(seconds, int) or seconds <= 0:
+        return "Error: Please provide a positive integer for the number of seconds to wait."
+    if seconds > 30:
+        return "Error: Wait time cannot exceed 30 seconds for safety."
+        
+    time.sleep(seconds)
+    return f"Successfully waited for {seconds} seconds."
+
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\web_search.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\tools\web_search.py
+import requests
+from bs4 import BeautifulSoup
+from .tool_manager import tool
+
+web_search_prompt = """You have performed a web search for the user's query: "{query}".
+Do NOT just list the search results. Synthesize a direct and helpful answer based on the information in the snippets.
+Use Markdown lists to structure your answer when appropriate.
+
+Search Results:
+{action_result}
+"""
+@tool(final_prompt=web_search_prompt)
+def web_search(query: str, max_results: int = 5):
+    """Searches the web using DuckDuckGo for up-to-date information."""
+    if not query: return "Error: Search query cannot be empty."
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    try:
+        url = f"https://html.duckduckgo.com/html/?q={query}"
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # --- MODIFIED: Use the original, more reliable selectors for the HTML version of the site ---
+        results = soup.select('div.result')
+        
+        if not results: return f"No search results found for '{query}'."
+
+        output = []
+        count = 0
+        for result in results:
+            if count >= max_results:
+                break
+            
+            # --- MODIFIED: Selectors are now more specific to the result div structure ---
+            title_tag = result.select_one('h2.result__title a')
+            snippet_tag = result.select_one('a.result__snippet')
+            
+            if title_tag and snippet_tag:
+                title = title_tag.get_text(strip=True)
+                snippet = snippet_tag.get_text(strip=True)
+                # Ensure we don't pick up empty snippets
+                if snippet:
+                    output.append(f"- **{title}**\n  - Snippet: {snippet}")
+                    count += 1
+                
+        if not output:
+             return f"No valid search results with titles and snippets were found for '{query}'."
+
+        return f"**Web Search Results for '{query}':**\n\n" + "\n".join(output)
+    except Exception as e:
+        return f"Error: An unexpected error occurred during the web search. Details: {e}"
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\utils\colors.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\utils\colors.py
+class Colors:
+    """ANSI color codes for a more detailed and readable log."""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    
+    # Standard Colors
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    
+    # Bright/Light Colors for message text
+    BRIGHT_RED = '\033[1;91m'
+    # --- ADDED: A new color for image analysis tags ---
+    BRIGHT_MAGENTA = '\033[1;95m'
+    BRIGHT_WHITE = '\033[1;97m'
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\corrector.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\corrector.py
+import json
+from log_client import log_message
+from .planner import Planner
+from .responder import Responder
+
+class Corrector:
+    """Handles the self-correction logic when a tool fails."""
+
+    def __init__(self, planner: Planner, responder: Responder):
+        self.planner = planner
+        self.responder = responder
+
+    async def self_correct(self, failed_action: dict, error_result: str, agent_instance):
+        """
+        Attempts to self-correct after a tool failure by creating a new plan.
+        Modifies the agent_instance's history directly.
+        """
+        original_user_message = next((msg['content'] for msg in reversed(agent_instance.history) if msg['role'] == 'user'), "the user's last request")
+
+        correction_prompt = (
+            f"**System Alert: Tool Execution Failed**\n\n"
+            f"My original request was: '{original_user_message}'.\n\n"
+            f"Your attempt to use the tool `{failed_action.get('action')}` with parameters `{json.dumps(failed_action.get('parameters'))}` resulted in the following error:\n"
+            f"```\n{error_result}\n```\n\n"
+            f"**Your task is to self-correct.** Analyze the error and formulate a new plan (a new JSON array of actions) to achieve the original goal."
+        )
+        
+        # Append the failure and correction prompt to the agent's history
+        agent_instance.history.append({"role": "assistant", "content": json.dumps(failed_action)})
+        agent_instance.history.append({"role": "user", "content": correction_prompt})
+        
+        # Now, use the updated history to select a new tool
+        new_action_list = await self.planner.select_tool(agent_instance.history)
+
+        if not new_action_list or new_action_list[0].get("action") == "conversation":
+            log_message("ROUTING", "Self-correction resulted in a conversational fallback.")
+            # Format a response explaining the original error, since correction failed.
+            # We pass the history *before* the correction attempt for this final response.
+            history_before_correction = agent_instance.history[:-2]
+            return self.responder.format_final_response(
+                results_list=[{"action": failed_action.get('action'), "parameters": failed_action.get('parameters'), "result": error_result}],
+                history=history_before_correction
+            )
+
+        log_message("ROUTING", f"Self-correction proposed new plan. Requesting user approval.")
+        return {
+            "type": "action_request",
+            "action_list": new_action_list,
+            "history": agent_instance.history # Return the fully updated history
+        }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\executor.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\executor.py
+import json
+from log_client import log_message
+from tools.tool_manager import execute_tool
+from .planner import Planner
+from .responder import Responder
+from .corrector import Corrector
+
+class Executor:
+    """Responsible for executing a list of actions and handling the results."""
+
+    def __init__(self, planner: Planner, responder: Responder, corrector: Corrector):
+        self.planner = planner
+        self.responder = responder
+        self.corrector = corrector
+
+    async def execute_action_list(self, action_list: list, agent_instance):
+        """
+        Executes a sequence of approved actions.
+        It takes the agent_instance to modify its history state.
+        """
+        all_results = []
+        final_response_data = None
+
+        for i, action_data in enumerate(action_list):
+            action_name = action_data.get("action")
+            parameters = action_data.get("parameters", {})
+            log_message("ROUTING", f"Executing step {i+1}/{len(action_list)}: '{action_name}' with params: {parameters}")
+
+            result = await execute_tool(action_name, parameters)
+
+            # --- Proactive planning workflow after a successful web search ---
+            if action_name == 'web_search' and not str(result).strip().startswith("Error:"):
+                log_message("ROUTING", "Web search successful. Analyzing results to formulate a new plan.")
+                # Add the search action and its results to history for context
+                agent_instance.history.append({"role": "assistant", "content": json.dumps(action_data)})
+                agent_instance.history.append({"role": "user", "content": f"TOOL_RESULT:\n{result}"})
+
+                # Ask the AI for the NEXT action based on the search results
+                new_action_list = await self.planner.select_tool(agent_instance.history)
+
+                if new_action_list and new_action_list[0].get("action") != "conversation":
+                    log_message("ROUTING", f"Formulated new plan from search results. Proposing to user.")
+                    return {
+                        "type": "action_request",
+                        "action_list": new_action_list,
+                        "history": agent_instance.history
+                    }
+                log_message("ROUTING", "Web search did not result in a new action plan. Summarizing results instead.")
+
+            # --- Handle special return types from tools ---
+            if isinstance(result, dict):
+                if result.get("screenshot_taken"):
+                    context_msg = f"I have taken a screenshot and saved it as '{result['unique_filename']}'. It is now available for analysis using this filename."
+                    agent_instance.history.append({"role": "assistant", "content": json.dumps(action_data)})
+                    agent_instance.history.append({"role": "user", "content": f"TOOL_RESULT:\n{context_msg}"})
+                    return {"type": "screenshot_taken", "unique_filename": result["unique_filename"], "history": agent_instance.history}
+                
+                elif result.get("file_sent"):
+                    context_msg = f"I have prepared the file '{result['original_filename']}' for download. It can be referenced by its unique name '{result['unique_filename']}' for analysis."
+                    agent_instance.history.append({"role": "assistant", "content": json.dumps(action_data)})
+                    agent_instance.history.append({"role": "user", "content": f"TOOL_RESULT:\n{context_msg}"})
+                    return {"type": "file_download", "filename": result["original_filename"], "unique_filename": result["unique_filename"], "history": agent_instance.history}
+
+                elif result.get("type") == "image_analysis":
+                    log_message("IMAGE_ANALYSIS", f"Sending image '{result['path']}' to LLM for analysis.")
+                    image_analysis_prompt = "You are analyzing the provided image. Fulfill the user's original request based on its content."
+                    last_user_message = next((msg['content'] for msg in reversed(agent_instance.history) if msg['role'] == 'user'), "")
+                    final_messages = [
+                        {"role": "system", "content": image_analysis_prompt},
+                        {"role": "user", "content": [last_user_message, {"image_path": result['path']}]}
+                    ]
+                    return {"type": "stream", "messages": final_messages}
+
+            log_message("TOOL_RESULT", str(result))
+            all_results.append({"action": action_name, "parameters": parameters, "result": str(result)})
+
+            # --- Handle tool failure and trigger self-correction ---
+            if isinstance(result, str) and result.strip().startswith("Error:"):
+                log_message("ROUTING", f"Tool '{action_name}' failed. Stopping sequence and attempting self-correction.")
+                final_response_data = await self.corrector.self_correct(action_data, result, agent_instance)
+                break 
+
+        if not final_response_data:
+            # The plan was executed successfully. Add the final tool result to history before summarizing.
+            # This gives the LLM context of what was just done.
+            agent_instance.history.append({"role": "assistant", "content": json.dumps(action_list)})
+            agent_instance.history.append({"role": "user", "content": f"TOOL_RESULT:\n{json.dumps(all_results)}"})
+            final_response_data = self.responder.format_final_response(all_results, agent_instance.history)
+
+        return final_response_data
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\planner.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\planner.py
+import json
+from llm.client import client, MODEL_NAME
+from llm.prompts import get_tool_selection_prompt
+from log_client import log_message
+from .utils import extract_json_from_response
+
+class Planner:
+    """Responsible for analyzing user requests and creating a tool execution plan."""
+
+    async def select_tool(self, history: list) -> list:
+        """
+        Selects one or more tools based on the conversation history and returns them as a list.
+        """
+        messages = [
+            {"role": "system", "content": get_tool_selection_prompt()},
+            *history
+        ]
+        try:
+            completion = client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=0.0)
+            ai_response_text = completion.choices[0].message.content.strip()
+            log_message("AI_RAW_RESPONSE", ai_response_text)
+            
+            json_string = extract_json_from_response(ai_response_text)
+            if json_string:
+                action_data = json.loads(json_string)
+                # Ensure the output is always a list for consistency.
+                if isinstance(action_data, dict):
+                    # If the LLM forgets and sends a single object, wrap it in a list.
+                    return [action_data]
+                if isinstance(action_data, list):
+                    return action_data
+        except Exception as e:
+            log_message("ERROR", f"Tool selection failed: {e}")
+        return [] # Return an empty list on failure
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\responder.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\responder.py
+import json
+from llm.prompts import AI_PERSONA_PROMPT
+from log_client import log_message
+
+class Responder:
+    """Handles formatting of final responses to the user."""
+
+    def get_conversational_response(self, history: list):
+        """Formats a simple conversational response when no tool is needed."""
+        log_message("ROUTING", "Proceeding with conversational response.")
+        prompt = (
+            f"{AI_PERSONA_PROMPT}"
+            "You have determined that no tool is needed for this request. "
+            "Provide a helpful, conversational response to the user."
+        )
+        messages = [{"role": "system", "content": prompt}, *history]
+        return {"type": "stream", "messages": messages}
+
+    def format_final_response(self, results_list: list, history: list):
+        """Formats the final response after a sequence of tool executions."""
+        log_message("ROUTING", "Sending tool results to LLM for final formatting.")
+        
+        # Create a summary of the executed plan and its results.
+        execution_summary = []
+        for item in results_list:
+            execution_summary.append(
+                f"Step: Executed tool `{item['action']}` with parameters `{json.dumps(item['parameters'])}`.\n"
+                f"Result: {item['result']}"
+            )
+        
+        summary_str = "\n\n".join(execution_summary)
+        
+        # --- MODIFIED: A more detailed and conversational prompt for generating the final response ---
+        final_prompt_with_result = (
+            f"{AI_PERSONA_PROMPT}\n"
+            "You have just executed a sequence of one or more tools for the user. Your primary goal is to provide a comprehensive, conversational, and helpful response based on the outcome.\n\n"
+            "**Response Guidelines:**\n"
+            "1.  **Explain Your Actions:** Start by confirming what you've done. For example, \"I've just searched the web for...\" or \"I've successfully listed the files on your desktop.\" Briefly explain why you took that action.\n"
+            "2.  **Present Detailed Results:** Present the tool results clearly and in detail. Do not give a one-sentence summary, especially for information-rich results like a web search. Use Markdown (like lists, bolding, or code blocks) to structure the information and make it readable.\n"
+            "3.  **Be Proactive:** Conclude your response by suggesting a relevant next step or asking a clarifying question. For example, \"Would you like me to analyze one of these files?\" or \"Is there anything specific in these results you'd like me to look into further?\"\n\n"
+            "--- EXECUTION SUMMARY ---\n"
+            f"This is the technical summary of the actions you just performed. Use it to formulate your response.\n"
+            f"{summary_str}\n"
+            "--- END SUMMARY ---\n\n"
+            "Now, generate your friendly, detailed, and proactive response to the user."
+        )
+        
+        # Use the last user message for context in the final response
+        last_user_message = next((msg for msg in reversed(history) if msg['role'] == 'user'), None)
+        
+        final_messages = [
+            {"role": "system", "content": final_prompt_with_result}
+        ]
+        if last_user_message:
+            final_messages.append(last_user_message)
+
+        return {"type": "stream", "messages": final_messages}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\utils.py
+# C:\Users\xox\Desktop\my-projects\Ai-Sentinel\core\agent_logic\utils.py
+import re
+
+def extract_json_from_response(text: str) -> str | None:
+    """
+    Extracts a JSON object or array from a string.
+    It looks for the first occurrence of a string starting with '{' and ending with '}'
+    or starting with '[' and ending with ']'.
+    """
+    # This regex is designed to find a JSON array `[...]` or a single object `{...}`
+    # It's non-greedy and handles nested structures.
+    match = re.search(r'\[.*\]|\{.*\}', text, re.DOTALL)
+    return match.group(0) if match else None
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\base.css
+/* static/css/base.css */
+/* Contains global styles, fonts, animations, variables, and body styling. */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Roboto+Mono&family=Source+Code+Pro&family=Fira+Code&display=swap');
+
+@keyframes glow-border {
+    0% { border-color: var(--border-action); box-shadow: 0 0 5px color-mix(in srgb, var(--border-action) 50%, transparent), inset 0 0 5px color-mix(in srgb, var(--border-action) 30%, transparent); }
+    50% { border-color: color-mix(in srgb, var(--border-action) 70%, white); box-shadow: 0 0 20px color-mix(in srgb, var(--border-action) 70%, transparent), inset 0 0 10px color-mix(in srgb, var(--border-action) 50%, transparent); }
+    100% { border-color: var(--border-action); box-shadow: 0 0 5px color-mix(in srgb, var(--border-action) 50%, transparent), inset 0 0 5px color-mix(in srgb, var(--border-action) 30%, transparent); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeInWord { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes slideIn { from { opacity: 0; transform: translateX(15px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes rowFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes rowFadeOut { to { opacity: 0; } }
+@keyframes subtle-glow {
+    0% { box-shadow: 0 0 4px var(--glow-color), inset 0 0 4px var(--glow-color-inset); }
+    50% { box-shadow: 0 0 12px var(--glow-color), inset 0 0 8px var(--glow-color-inset); }
+    100% { box-shadow: 0 0 4px var(--glow-color), inset 0 0 4px var(--glow-color-inset); }
+}
+@keyframes zoomIn {
+    from { transform: scale(0.8); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+@keyframes slideUpFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(15px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+@keyframes slideInFromLeft {
+    from {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+@keyframes slideInFromRight {
+    from {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+@keyframes code-border-glow {
+	0% { border-color: color-mix(in srgb, var(--border-accent) 40%, transparent); }
+	50% { border-color: color-mix(in srgb, var(--border-accent) 90%, white); }
+	100% { border-color: color-mix(in srgb, var(--border-accent) 40%, transparent); }
+}
+
+:root {
+    --font-debug: 'Fira Code', monospace;
+    --usage-low: #00b894;
+    --usage-medium: #fdcb6e;
+    --usage-high: #d63031;
+    --usage-low-bg: rgba(0, 184, 148, 0.15);
+    --usage-medium-bg: rgba(253, 203, 110, 0.2);
+    --usage-high-bg: rgba(214, 48, 49, 0.25);
+}
+
+html { font-size: 16px; }
+body { font-family: var(--font-main); background: var(--bg-secondary); color: var(--text-primary); height: 100vh; width: 100vw; margin: 0; overflow: hidden; display: flex; }
+#matrix-canvas { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; }
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); border-radius: 4px; }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\chat.css
+/* static/css/chat.css */
+/* Contains all styles specific to the chat view and its elements. */
+
+#chat-view { position: relative; display: flex; flex-direction: column; height: 100%; }
+#chat-window { flex-grow: 1; overflow-y: auto; min-height: 0; padding: 20px; display: flex; flex-direction: column; gap: 1.5rem; }
+.input-area-wrapper { flex-shrink: 0; display: flex; flex-direction: column; padding: 1rem; border-top: 1px solid var(--border-primary); background-color: var(--bg-primary); gap: 10px; z-index: 6; }
+#welcome-screen {
+    position: absolute; top: 65px; left: 0; right: 0; bottom: 0;
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    background: var(--bg-primary); z-index: 5; transition: opacity 0.5s ease-out; padding: 20px;
+}
+.message-wrapper { display: flex; max-width: 85%; align-items: flex-start; gap: 10px; }
+.avatar {
+    width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; margin-top: 5px;
+}
+.sentinel-message .avatar { background-color: var(--bg-sentinel-msg); color: var(--border-accent); }
+.user-message .avatar { background-color: var(--bg-user-msg); color: var(--text-user-msg); }
+.message { padding: 0.8rem 1.2rem; border-radius: 20px; line-height: 1.5; display: flex; flex-direction: column; width: 100%; }
+.message p { margin: 0; }
+/* --- MODIFIED: Removed the background container from user messages for a cleaner look. --- */
+.user-message { background-color: transparent; color: var(--text-primary); border-bottom-right-radius: 5px; }
+.sentinel-message { background-color: transparent; color: var(--text-primary); border-bottom-left-radius: 5px; }
+.message-wrapper.user-message { align-self: flex-end; flex-direction: row-reverse; animation: slideInFromRight 0.4s ease-out; }
+.message-wrapper.sentinel-message { align-self: flex-start; animation: slideInFromLeft 0.4s ease-out; }
+
+.message-content {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.message-content p {
+    margin-top: 0;
+    margin-bottom: 1rem;
+}
+.message-content p:last-child {
+    margin-bottom: 0;
+}
+
+.action-request-message { border: 2px solid var(--border-action); background-color: var(--bg-action-req); animation: glow-border 2.5s ease-in-out infinite; }
+.error-message { background-color: #4d2a2a; border-left: 4px solid #f44336; color: #f7c5c5; }
+.blinking-cursor { animation: blink 1s step-end infinite; font-weight: bold; color: var(--text-primary); }
+#welcome-screen.hidden { opacity: 0; pointer-events: none; }
+.welcome-message { font-size: 2.5rem; font-weight: 600; color: var(--text-header); text-align: center; }
+.welcome-message span { display: inline-block; opacity: 0; animation: fadeInWord 0.5s forwards; margin-right: 0.25em; }
+#file-attachment-preview { background-color: var(--bg-input); padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center; }
+#file-attachment-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#file-attachment-preview button { background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 1rem; }
+#file-attachment-preview button:hover { color: var(--text-primary); }
+#suggestion-chips { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; transition: opacity 0.5s ease-out, max-height 0.5s ease-out, margin-bottom 0.5s ease-out; max-height: 100px; overflow: hidden; padding: 5px 0; }
+#suggestion-chips.hidden { opacity: 0; max-height: 0; margin-bottom: 0; pointer-events: none; }
+.suggestion-chip { padding: 8px 16px; background-color: var(--bg-input); border: 1px solid var(--border-primary); border-radius: 20px; color: var(--text-secondary); cursor: pointer; font-size: 0.9rem; transition: all 0.2s ease; font-family: var(--font-main); }
+.suggestion-chip:hover { background-color: var(--bg-sentinel-msg); color: var(--text-primary); border-color: var(--border-accent); transform: translateY(-2px); }
+.input-area { display: flex; gap: 10px; align-items: center; }
+#message-input { flex-grow: 1; padding: 0.9rem; border-radius: 22px; border: 1px solid var(--border-primary); background-color: var(--bg-input); color: var(--text-primary); font-size: 1rem; font-family: inherit; }
+#send-button, #stop-button, #attach-file-button { height: 48px; width: 48px; border-radius: 50%; border: none; background-color: var(--bg-input); color: var(--text-primary); font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background-color 0.2s ease, transform 0.2s ease; flex-shrink: 0; }
+#send-button { background-color: var(--bg-user-msg); color: var(--text-user-msg); font-size: 1.5rem; }
+#attach-file-button:hover, #send-button:hover, #stop-button:hover { filter: brightness(1.2); }
+#attach-flyout-container { position: relative; display: flex; }
+#attach-options { position: absolute; bottom: 110%; left: 0; background-color: var(--bg-flyout); border-radius: 8px; padding: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 8px; z-index: 10; width: max-content; opacity: 0; transform: translateY(10px); pointer-events: none; transition: opacity 0.2s ease-out, transform 0.2s ease-out; }
+#attach-options.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+#attach-options button { background: none; border: none; color: var(--text-primary); padding: 8px 12px; border-radius: 6px; display: flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; font-size: 0.95rem; font-family: var(--font-main); transition: background-color 0.2s; }
+#attach-options button:hover { background-color: color-mix(in srgb, var(--border-accent) 20%, transparent); }
+#attach-options button i { width: 16px; text-align: center; color: var(--text-secondary); }
+.download-message { background-color: var(--bg-sentinel-msg); border-left: 3px solid var(--usage-low); }
+.download-button { display: inline-block; padding: 10px 15px; margin-top: 10px; background-color: var(--bg-user-msg); color: var(--text-user-msg); text-decoration: none; border-radius: 8px; font-weight: 500; transition: background-color 0.2s, transform 0.2s; max-width: 200px; text-align: center; }
+.download-button:hover { background-color: color-mix(in srgb, var(--bg-user-msg) 85%, black); transform: translateY(-2px); }
+.download-button i { margin-right: 8px; }
+
+.message strong {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.message ul, .message ol {
+    padding-left: 25px;
+    margin: 0.8rem 0;
+}
+.message li {
+    margin-bottom: 0.5rem;
+    line-height: 1.6;
+}
+.message li::marker {
+    color: var(--border-accent);
+    font-weight: bold;
+}
+.message blockquote {
+    border-left: 3px solid var(--border-accent);
+    margin: 1rem 0;
+    padding: 0.25rem 0 0.25rem 1.25rem;
+    color: var(--text-secondary);
+    background-color: rgba(0,0,0,0.1);
+    border-radius: 0 8px 8px 0;
+}
+.message h1, .message h2, .message h3 {
+    margin-top: 1.2rem;
+    margin-bottom: 0.6rem;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--text-primary);
+}
+.message h1 { font-size: 1.25rem; }
+.message h2 { font-size: 1.15rem; }
+.message h3 { font-size: 1.05rem; }
+
+.message .code-block-wrapper {
+    margin-top: 1rem;
+    border-radius: 10px;
+    border: 1px solid;
+    animation: code-border-glow 4s linear infinite;
+    background: #0d1117;
+    overflow: hidden;
+}
+.message .code-block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-family: var(--font-main);
+}
+.message .copy-code-button {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+}
+.message .copy-code-button:hover {
+    color: var(--text-primary);
+    background-color: rgba(255, 255, 255, 0.1);
+    border-color: var(--border-primary);
+}
+.message .copy-code-button.copied {
+    color: var(--usage-low);
+}
+.message .code-block-wrapper pre {
+    margin: 0;
+    background: transparent;
+    padding: 1rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: var(--font-mono);
+}
+.message .code-block-wrapper pre code {
+    padding: 0;
+    margin: 0;
+    background: none;
+    white-space: inherit;
+    font-size: 0.9rem;
+    color: #c9d1d9;
+}
+
+.image-attachment-container {
+    margin-top: 8px;
+    max-width: 100%;
+}
+.image-attachment-container img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 12px;
+    border: 1px solid var(--border-primary);
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+.image-attachment-container img:hover {
+    transform: scale(1.02);
+}
+
+.capability-list-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+.capability-list-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+}
+.capability-item {
+    background-color: color-mix(in srgb, var(--bg-primary) 50%, var(--bg-secondary));
+    border-left: 2px solid var(--border-accent);
+    padding: 0.5rem 0.8rem;
+    border-radius: 8px;
+    opacity: 0;
+    animation: slideUpFadeIn 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+    display: flex;
+    flex-direction: column;
+}
+.capability-item-header {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+    font-family: var(--font-mono);
+}
+.capability-name {
+    font-weight: bold;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+}
+.capability-signature {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+}
+.capability-description {
+    margin-top: 0.3rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+/* --- ADDED: Styling for beautiful, animated links --- */
+.message-content a {
+    color: var(--border-accent);
+    text-decoration: none;
+    position: relative;
+    padding-bottom: 2px;
+    font-weight: 500;
+}
+.message-content a::after {
+    content: '';
+    position: absolute;
+    width: 100%;
+    transform: scaleX(0);
+    height: 2px;
+    bottom: 0;
+    left: 0;
+    background-color: var(--border-accent);
+    transform-origin: bottom right;
+    transition: transform 0.25s ease-out;
+}
+.message-content a:hover::after {
+    transform: scaleX(1);
+    transform-origin: bottom left;
+}
+.message-content a:hover {
+    filter: brightness(1.2);
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\components.css
+/* static/css/components.css */
+/* Contains styles for reusable UI components like the lightbox. */
+
+.lightbox-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 1000; display: none; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px);
+    animation: fadeIn 0.3s;
+}
+.lightbox-overlay.visible { display: flex; }
+.lightbox-content {
+    max-width: 90vw; max-height: 90vh;
+    animation: zoomIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+.lightbox-close {
+    position: absolute; top: 20px; right: 40px;
+    color: #fff; font-size: 40px; font-weight: bold;
+    cursor: pointer; transition: color 0.2s;
+}
+.lightbox-close:hover { color: #ccc; }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\dashboard.css
+/* static/css/dashboard.css */
+/* Contains all styles specific to the dashboard view and its metrics. */
+
+.dashboard-nav { display: flex; flex-direction: column; gap: 0.5rem; padding: 1rem; border-right: 1px solid var(--border-primary); background-color: var(--bg-secondary); }
+.dashboard-tab { background: none; border: none; color: var(--text-secondary); padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 500; text-align: left; display: flex; align-items: center; gap: 0.75rem; transition: background-color 0.2s, color 0.2s; width: 100%; }
+.dashboard-tab:hover { background-color: rgba(255,255,255,0.05); color: var(--text-primary); }
+.dashboard-tab.active { background-color: var(--bg-user-msg); color: var(--text-user-msg); }
+.dashboard-main { flex-grow: 1; padding: 1.5rem; overflow-y: auto; }
+.tab-pane { display: none; }
+.tab-pane.active { display: block; animation: fadeIn 0.4s ease; }
+.tab-pane h3 { margin-top: 0; margin-bottom: 1.5rem; font-size: 1.5rem; color: var(--text-primary); }
+.overview-grid, .performance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+.metric-card { background-color: var(--bg-secondary); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border-primary); }
+.metric-card h4 { margin-top: 0; margin-bottom: 1rem; color: var(--text-secondary); }
+.cpu-cores-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem; }
+.info-list { list-style: none; padding: 0; background-color: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px; }
+.info-list li { padding: 1rem 1.5rem; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-primary); }
+.info-list li:last-child { border-bottom: none; }
+.info-list .info-label { font-weight: 600; color: var(--text-secondary); }
+.info-list .info-value { color: var(--text-primary); font-family: var(--font-debug); }
+#overview-network { display: flex; flex-direction: column; gap: 1rem; justify-content: center; }
+.network-speed-container { display: flex; align-items: center; gap: 1rem; }
+.network-speed { font-size: 1.5rem; font-weight: bold; }
+.metric-gauge { margin-bottom: 1rem; }
+.metric-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.metric-label { font-weight: 500; color: var(--text-secondary); display: flex; align-items: center; gap: 0.5rem; }
+.metric-value { font-weight: bold; color: var(--text-primary); font-family: var(--font-main); }
+.progress-bar-container { width: 100%; background-color: rgba(0,0,0,0.2); border-radius: 6px; height: 10px; overflow: hidden; transition: box-shadow 0.5s ease; }
+.progress-bar-container[data-usage="low-usage"] { --glow-color: color-mix(in srgb, var(--usage-low) 30%, transparent); --glow-color-inset: color-mix(in srgb, var(--usage-low) 10%, transparent); animation: subtle-glow 4s ease-in-out infinite; }
+.progress-bar-container[data-usage="medium-usage"] { --glow-color: color-mix(in srgb, var(--usage-medium) 40%, transparent); --glow-color-inset: color-mix(in srgb, var(--usage-medium) 20%, transparent); animation: subtle-glow 3s ease-in-out infinite; }
+.progress-bar-container[data-usage="high-usage"] { --glow-color: color-mix(in srgb, var(--usage-high) 50%, transparent); --glow-color-inset: color-mix(in srgb, var(--usage-high) 25%, transparent); animation: subtle-glow 2s ease-in-out infinite; }
+.progress-bar { height: 100%; border-radius: 4px; transition: width 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94), background-color 0.5s ease; }
+.low-usage { background-color: var(--usage-low); }
+.medium-usage { background-color: var(--usage-medium); }
+.high-usage { background-color: var(--usage-high); }
+#process-list-container { overflow-y: auto; max-height: calc(100% - 60px); }
+.process-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.process-table thead { position: sticky; top: 0; background-color: var(--bg-header); backdrop-filter: blur(5px); z-index: 1; }
+.process-table th { text-align: left; padding: 0.75rem 1rem; border-bottom: 2px solid var(--border-accent); font-weight: 600; color: var(--text-primary); }
+.process-table tbody tr { animation: rowFadeIn 0.3s ease-out forwards; transition: background-color 0.2s ease; }
+.process-table tbody tr.removing { animation: rowFadeOut 0.3s ease-out forwards; }
+.process-table td { padding: 0.5rem 1rem; border-bottom: 1px solid var(--border-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.process-table td:nth-child(2) { display: flex; align-items: center; gap: 0.75rem; }
+.process-table td:nth-child(3) { font-weight: bold; text-align: right; padding-right: 1.5rem; }
+.process-table td.cpu-cell { transition: background-color 0.4s ease; border-radius: 4px; }
+.process-table td.cpu-cell.low-usage { background: var(--usage-low-bg); color: var(--text-primary); }
+.process-table td.cpu-cell.medium-usage { background: var(--usage-medium-bg); color: var(--text-primary); }
+.process-table td.cpu-cell.high-usage { background: var(--usage-high-bg); color: var(--text-primary); }
+.process-table td .fa-chrome { color: #4285F4; }
+.process-table td .fa-edge { color: #0078D7; }
+.process-table td .fa-firefox-browser { color: #FF7139; }
+.process-table td .fa-python { color: #FFD43B; }
+.process-table td .fa-discord { color: #5865F2; }
+.process-table td .fa-spotify { color: #1DB954; }
+.process-table td .fa-steam { color: #c7d5e0; }
+.process-table td .fa-code { color: #007ACC; }
+.process-table tbody tr:hover { background-color: rgba(255, 255, 255, 0.05); }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\layout.css
+/* static/css/layout.css */
+/* Contains styles for the main application layout, sidebar, and views. */
+
+.app-layout { display: flex; width: 100%; height: 100%; }
+.app-sidebar {
+    width: 60px; background-color: var(--bg-secondary); border-right: 1px solid var(--border-primary);
+    display: flex; flex-direction: column; align-items: center; padding: 1rem 0; flex-shrink: 0; z-index: 10;
+}
+.sidebar-header { font-size: 2rem; color: var(--border-accent); margin-bottom: 2rem; }
+.sidebar-buttons { display: flex; flex-direction: column; gap: 1rem; }
+.sidebar-button {
+    background: none; border: none; color: var(--text-secondary); font-size: 1.5rem; width: 48px; height: 48px;
+    border-radius: 12px; cursor: pointer; position: relative; display: flex; align-items: center;
+    justify-content: center; transition: background-color 0.2s, color 0.2s;
+}
+.sidebar-button:hover { background-color: var(--bg-input); color: var(--text-primary); }
+.sidebar-button.active { background-color: var(--border-accent); color: white; box-shadow: 0 0 15px color-mix(in srgb, var(--border-accent) 40%, transparent); }
+
+/* --- ADDED: Styles for the new logout button section --- */
+.sidebar-footer {
+    margin-top: auto; /* Pushes this to the bottom */
+}
+#logout-button .fa-right-from-bracket {
+    transition: color 0.2s ease;
+}
+#logout-button:hover .fa-right-from-bracket {
+    color: var(--error-color, #d63031); /* Use error color on hover */
+}
+
+
+.app-content { flex-grow: 1; min-width: 0; position: relative; min-height: 0; }
+
+.view { display: none; flex-direction: column; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--bg-primary); }
+.view.active { display: flex; animation: fadeIn 0.3s ease; }
+.view-content { flex-grow: 1; min-height: 0; display: flex; }
+.view-content.centered { display: flex; justify-content: center; align-items: flex-start; padding: 2rem; overflow-y: auto; }
+
+.header {
+    padding: 1rem 1.5rem; background-color: var(--bg-header); border-bottom: 1px solid var(--border-primary);
+    backdrop-filter: blur(10px); display: flex; justify-content: center; align-items: center; flex-shrink: 0;
+}
+.header h1 { font-size: 1.5rem; margin: 0; font-weight: 600; color: var(--text-header); }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\login.css
+/* static/css/login.css */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+:root {
+    --bg-color: #1c1e21;
+    --box-bg-color: #242526;
+    --border-color: #3a3b3c;
+    --text-primary: #e4e6eb;
+    --text-secondary: #b0b3b8;
+    --accent-color: #0084ff;
+    --accent-glow: rgba(0, 132, 255, 0.5);
+    --error-color: #d63031;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.login-container {
+    perspective: 1000px;
+}
+
+.login-box {
+    width: 380px;
+    background-color: var(--box-bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 40px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.login-header {
+    margin-bottom: 30px;
+}
+
+.login-header .fa-shield-halved {
+    font-size: 3rem;
+    color: var(--accent-color);
+    text-shadow: 0 0 15px var(--accent-glow);
+}
+
+.login-header h1 {
+    font-size: 1.8rem;
+    margin-top: 10px;
+    font-weight: 600;
+}
+
+#login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.input-group {
+    position: relative;
+}
+
+.input-group i {
+    position: absolute;
+    left: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-secondary);
+    transition: color 0.2s ease;
+}
+
+.input-group input {
+    width: 100%;
+    padding: 14px 14px 14px 45px;
+    background-color: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 1rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.input-group input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 10px var(--accent-glow);
+}
+
+.input-group input:focus + i {
+    color: var(--accent-color);
+}
+
+.login-button {
+    padding: 14px;
+    background-color: var(--accent-color);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
+}
+
+.login-button:hover {
+    background-color: #0073e6;
+    box-shadow: 0 0 15px var(--accent-glow);
+}
+
+.login-button:active {
+    transform: scale(0.98);
+}
+
+.login-note {
+    margin-top: 15px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\css\settings.css
+/* static/css/settings.css */
+/* Contains all styles specific to the settings view. */
+
+.settings-container {
+    width: 100%; max-width: 700px; display: flex; flex-direction: column;
+    gap: 1.5rem; background-color: var(--bg-secondary); padding: 2rem;
+    border-radius: 12px; border: 1px solid var(--border-primary);
+}
+.setting-item { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.setting-item label { font-weight: 500; }
+.switch { position: relative; display: inline-block; width: 50px; height: 28px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; }
+.slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 4px; bottom: 4px; background-color: white; transition: .4s; }
+input:checked + .slider { background-color: var(--border-accent); }
+input:checked + .slider:before { transform: translateX(22px); }
+.slider.round { border-radius: 34px; }
+.slider.round:before { border-radius: 50%; }
+.theme-selector button { padding: 8px 16px; border: 2px solid var(--text-secondary); background: transparent; color: var(--text-secondary); border-radius: 8px; cursor: pointer; transition: all 0.2s ease-in-out; }
+.theme-selector button:hover { color: var(--text-primary); border-color: var(--text-primary); }
+.theme-selector button.active { border-color: var(--border-accent); color: var(--border-accent); font-weight: bold; box-shadow: 0 0 10px color-mix(in srgb, var(--border-accent) 30%, transparent); }
+#history-length-value, #ui-scale-value { color: var(--text-secondary); font-size: 0.9rem; }
+.slider-container { display: flex; align-items: center; gap: 10px; flex-grow: 1; }
+.slider-container input[type="range"] { flex-grow: 1; }
+.settings-container select { background-color: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-primary); padding: 8px; border-radius: 6px; font-family: var(--font-main); }
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\api.js
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\api.js
+// Handles all fetch requests to the backend
+import * as ui from './ui.js';
+import * as dom from './dom.js';
+
+export async function sendMessage(state) {
+    if (state.abortController) state.abortController.abort();
+    const messageText = dom.messageInput.value.trim();
+    if (!messageText && !state.attachedFile) return;
+
+    if (state.isFirstMessage) {
+        ui.hideIntroElements();
+        state.isFirstMessage = false;
+    }
+
+    const messageOptions = {
+        file: state.attachedFile,
+    };
+    ui.appendMessage("user", messageText, messageOptions);
+    
+    if (state.settings.enableHistory) {
+        state.conversationHistory.push({ role: 'user', content: messageText });
+    }
+
+    dom.messageInput.value = "";
+    ui.setLoadingState(true);
+    state.abortController = new AbortController();
+
+    try {
+        let response;
+        const historyToSend = state.settings.enableHistory ? state.conversationHistory.slice(0, -1) : [];
+        const formData = new FormData();
+
+        if (state.uploadMode === 'share' && state.attachedFile) {
+            formData.append('file', state.attachedFile);
+            response = await fetch("/share_file", { 
+                method: "POST", 
+                body: formData, 
+                signal: state.abortController.signal 
+            });
+
+        } else if (state.attachedFile) {
+            formData.append('file', state.attachedFile);
+            formData.append('message', messageText);
+            formData.append('history', JSON.stringify(historyToSend));
+            formData.append('historyLength', state.settings.historyLength);
+            formData.append('upload_mode', state.uploadMode);
+            response = await fetch("/chat_with_upload", { method: "POST", body: formData, signal: state.abortController.signal });
+        } else {
+            const requestBody = { message: messageText, history: historyToSend, historyLength: state.settings.historyLength };
+            response = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody), signal: state.abortController.signal });
+        }
+
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        await handleResponse(response, state);
+
+    } catch (error) {
+        if (error.name !== 'AbortError') {
+            ui.appendMessage("sentinel", `Error: ${error.message}`);
+        }
+    } finally {
+        if (state.attachedFile) {
+            dom.fileInput.value = '';
+            state.attachedFile = null;
+            ui.updateFilePreview(state);
+        }
+        ui.setLoadingState(false);
+    }
+}
+
+// --- MODIFIED: This function now sends the entire action_list back to the server. ---
+async function handleAction(approved, actionList, requestMessage, historyFromAction, state) {
+    const wrapper = requestMessage.closest('.message-wrapper');
+    if (wrapper) wrapper.remove();
+    
+    if (state.settings.enableHistory && historyFromAction) {
+        state.conversationHistory = historyFromAction;
+    }
+
+    if (!approved) {
+        ui.appendMessage("sentinel", "Action denied.");
+        if(state.settings.enableHistory) state.conversationHistory.push({role: 'assistant', content: "Action denied."});
+        return;
+    }
+
+    ui.setLoadingState(true);
+    state.abortController = new AbortController();
+
+    try {
+        const tempMessageDiv = ui.appendMessage("sentinel", "...", {isStreaming: true});
+        const requestBody = { 
+            approved, 
+            action_list: actionList, // Send the list of actions
+            history: state.conversationHistory, 
+            historyLength: state.settings.historyLength 
+        };
+        
+        const response = await fetch("/execute_action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+            signal: state.abortController.signal
+        });
+
+        const tempWrapper = tempMessageDiv.closest('.message-wrapper');
+        if (tempWrapper) tempWrapper.remove();
+        
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        await handleResponse(response, state);
+
+    } catch (error) {
+        if (error.name !== 'AbortError') {
+            ui.appendMessage("sentinel", `Error: Could not execute action. ${error.message}`);
+        }
+    } finally {
+        ui.setLoadingState(false);
+    }
+}
+
+async function handleResponse(response, state) {
+    const contentType = response.headers.get("content-type");
+    
+    if (contentType && contentType.includes("application/json")) {
+        const data = await response.json();
+
+        // --- ADDED: Centralized history update for all relevant JSON responses ---
+        if (data.history && state.settings.enableHistory) {
+            state.conversationHistory = data.history;
+        }
+
+        if (data.file_download) {
+            ui.appendDownloadMessage(data.filename, data.download_url, state);
+        } else if (data.action_request && data.action_list) {
+            const msgDiv = ui.appendMessage("sentinel", data.response);
+            msgDiv.classList.add("action-request-message"); 
+
+            const buttonDiv = document.createElement("div");
+            buttonDiv.classList.add("action-buttons");
+            const approveButton = document.createElement("button");
+            approveButton.textContent = "Approve";
+            approveButton.onclick = () => handleAction(true, data.action_list, msgDiv, data.history, state);
+            const denyButton = document.createElement("button");
+            denyButton.textContent = "Deny";
+            denyButton.classList.add("deny");
+            denyButton.onclick = () => handleAction(false, data.action_list, msgDiv, data.history, state);
+            buttonDiv.appendChild(approveButton);
+            buttonDiv.appendChild(denyButton);
+            msgDiv.appendChild(buttonDiv);
+        } else if (data.capability_list) {
+            ui.appendCapabilityList(data.tools, state);
+        } else if (data.generated_image) {
+            ui.appendGeneratedImageMessage(data.prompt, data.download_url, state);
+        } else if (data.screenshot_taken) {
+            ui.appendScreenshotMessage(data.download_url, state);
+        }
+    } 
+    else {
+        const sentinelMessageDiv = ui.appendMessage("sentinel", "", {isStreaming: true});
+        await ui.streamResponse(response, sentinelMessageDiv, state);
+    }
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\app.js
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\app.js
+import * as dom from './dom.js';
+import * as ui from './ui.js';
+import * as api from './api.js';
+import * as settings from './settings.js';
+import * as metrics from './metrics.js';
+
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    const state = {
+        abortController: null,
+        conversationHistory: [],
+        attachedFile: null,
+        uploadMode: 'save',
+        isFirstMessage: true,
+        settings: {
+            enableHistory: true,
+            historyLength: 10,
+            theme: 'dark',
+            uiScale: 100,
+            fontFamily: "'Inter', sans-serif"
+        }
+    };
+
+    const allSuggestions = [
+        "List files on my desktop",
+        "What is my public IP address?",
+        "Get detailed system info",
+        "Search the web for 'latest AI news'",
+        "What can you do?",
+        "Execute the command: ping 8.8.8.8",
+        "Show running processes",
+        "What time is it?"
+    ];
+    shuffleArray(allSuggestions);
+    const suggestionsToShow = allSuggestions.slice(0, 4);
+
+    settings.loadSettings(state.settings);
+    ui.animateWelcomeMessage("I am the AI Sentinel. How can I assist you?");
+    ui.renderSuggestions(suggestionsToShow, state);
+    
+    try {
+        metrics.init();
+    } catch (error) {
+        console.error("Failed to initialize system metrics:", error);
+    }
+
+    // --- Event Listeners ---
+    dom.sendButton.addEventListener("click", () => api.sendMessage(state));
+    dom.messageInput.addEventListener("keypress", (e) => { if (e.key === "Enter" && !dom.messageInput.disabled) api.sendMessage(state); });
+    dom.stopButton.addEventListener("click", () => { state.abortController?.abort(); });
+    // --- ADDED: Event listener for the logout button ---
+    if (dom.logoutButton) {
+        dom.logoutButton.addEventListener('click', () => {
+            window.location.href = '/'; // Redirect to the login page (root)
+        });
+    }
+
+
+    // --- Main View Switching Logic ---
+    dom.appSidebar.addEventListener('click', (e) => {
+        const targetViewButton = e.target.closest('.sidebar-button');
+        // --- MODIFIED: Ignore clicks on the logout button for view switching ---
+        if (!targetViewButton || targetViewButton.id === 'logout-button') return;
+
+        const viewName = targetViewButton.dataset.view;
+
+        // Update active button state in the sidebar
+        dom.sidebarButtons.forEach(btn => btn.classList.remove('active'));
+        targetViewButton.classList.add('active');
+
+        // Show the correct view and hide others
+        dom.contentViews.forEach(view => {
+            view.classList.toggle('active', view.id === `${viewName}-view`);
+        });
+    });
+
+    // --- Dashboard Tab Switching Logic ---
+    dom.dashboardNav.addEventListener('click', (e) => {
+        const targetTab = e.target.closest('.dashboard-tab');
+        if (!targetTab) return;
+
+        dom.dashboardNav.querySelectorAll('.dashboard-tab').forEach(tab => tab.classList.remove('active'));
+        targetTab.classList.add('active');
+
+        const tabName = targetTab.dataset.tab;
+        dom.tabPanes.forEach(pane => {
+            pane.classList.toggle('active', pane.id === `tab-${tabName}`);
+        });
+    });
+    
+    // --- File Attachment Logic ---
+    dom.attachFileButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dom.attachOptions.classList.toggle('visible');
+    });
+    dom.uploadForSaveButton.addEventListener('click', () => {
+        state.uploadMode = 'save';
+        dom.attachOptions.classList.remove('visible');
+        dom.fileInput.click();
+    });
+    dom.uploadForAnalyzeButton.addEventListener('click', () => {
+        state.uploadMode = 'analyze';
+        dom.attachOptions.classList.remove('visible');
+        dom.fileInput.click();
+    });
+    dom.uploadForShareButton.addEventListener('click', () => {
+        state.uploadMode = 'share';
+        dom.attachOptions.classList.remove('visible');
+        dom.fileInput.click();
+    });
+    window.addEventListener('click', (e) => {
+        if (!dom.attachFlyoutContainer.contains(e.target)) {
+            dom.attachOptions.classList.remove('visible');
+        }
+    });
+    dom.fileInput.addEventListener('change', () => {
+        if (dom.fileInput.files.length > 0) {
+            state.attachedFile = dom.fileInput.files[0];
+            ui.updateFilePreview(state);
+            // --- MODIFIED: Do NOT auto-send. Instead, pre-fill the input box. ---
+            if (state.uploadMode === 'analyze') {
+                dom.messageInput.value = `Analyze this file: ${state.attachedFile.name}`;
+                dom.messageInput.focus();
+            } else if (state.uploadMode === 'share') {
+                dom.messageInput.value = `Share this file: ${state.attachedFile.name}`;
+                dom.messageInput.focus();
+            }
+        }
+    });
+    
+    // --- MODIFIED: Robust lightbox event listeners ---
+    if (dom.lightbox) {
+        dom.lightbox.addEventListener('click', (e) => {
+            // Close only if the background overlay is clicked, not the image itself
+            if (e.target.id === 'image-lightbox') {
+                ui.closeLightbox();
+            }
+        });
+    }
+    if (dom.lightboxClose) {
+        dom.lightboxClose.addEventListener('click', () => ui.closeLightbox());
+    }
+
+
+    // --- Settings Controls Logic ---
+    dom.enableHistoryToggle.addEventListener('change', (e) => { 
+        state.settings.enableHistory = e.target.checked; 
+        if (!state.settings.enableHistory) { state.conversationHistory = []; }
+        settings.saveSettings(state.settings); 
+    });
+    dom.historyLengthSlider.addEventListener('input', (e) => {
+        state.settings.historyLength = parseInt(e.target.value, 10);
+        dom.historyLengthValue.textContent = `${state.settings.historyLength} messages`;
+    });
+    dom.historyLengthSlider.addEventListener('change', () => settings.saveSettings(state.settings));
+    dom.uiScaleSlider.addEventListener('input', (e) => {
+        state.settings.uiScale = parseInt(e.target.value, 10);
+        document.documentElement.style.fontSize = `${state.settings.uiScale / 100 * 16}px`;
+        dom.uiScaleValue.textContent = `${state.settings.uiScale}%`;
+    });
+    dom.uiScaleSlider.addEventListener('change', () => settings.saveSettings(state.settings));
+    dom.fontSelector.addEventListener('change', (e) => {
+        state.settings.fontFamily = e.target.value;
+        document.body.style.setProperty('--font-main', state.settings.fontFamily);
+        settings.saveSettings(state.settings);
+    });
+    dom.themeSelector.addEventListener('click', (e) => {
+        if (e.target.tagName === 'BUTTON') {
+            state.settings.theme = e.target.dataset.theme;
+            settings.applySettings(state.settings);
+            settings.saveSettings(state.settings);
+        }
+    });
+});
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\dom.js
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\dom.js
+// Central repository for all DOM element queries
+export const chatWindow = document.getElementById("chat-window");
+export const messageInput = document.getElementById("message-input");
+export const sendButton = document.getElementById("send-button");
+export const stopButton = document.getElementById("stop-button");
+
+// --- Main App Layout Selectors ---
+export const appSidebar = document.querySelector('.app-sidebar');
+export const sidebarButtons = document.querySelectorAll('.sidebar-button');
+export const contentViews = document.querySelectorAll('.view');
+// --- ADDED: Selector for the logout button ---
+export const logoutButton = document.getElementById('logout-button');
+
+// --- View-specific containers ---
+export const chatView = document.getElementById('chat-view');
+export const dashboardView = document.getElementById('dashboard-view');
+export const settingsView = document.getElementById('settings-view');
+
+// --- Dashboard Sub-components ---
+export const dashboardNav = document.querySelector('.dashboard-nav');
+export const tabPanes = document.querySelectorAll('.tab-pane');
+
+// --- Settings Sub-components ---
+export const uiScaleSlider = document.getElementById("ui-scale");
+export const uiScaleValue = document.getElementById("ui-scale-value");
+export const fontSelector = document.getElementById("font-selector");
+export const enableHistoryToggle = document.getElementById("enable-history");
+export const historyLengthSlider = document.getElementById("history-length");
+export const historyLengthValue = document.getElementById("history-length-value");
+export const themeSelector = document.getElementById("theme-selector");
+
+// Other elements
+export const themeStylesheet = document.getElementById("theme-stylesheet");
+export const matrixCanvas = document.getElementById('matrix-canvas');
+export const fileInput = document.getElementById('file-input');
+export const attachFileButton = document.getElementById('attach-file-button');
+export const attachOptions = document.getElementById('attach-options');
+export const uploadForSaveButton = document.getElementById('upload-for-save-button');
+export const uploadForAnalyzeButton = document.getElementById('upload-for-analyze-button');
+export const uploadForShareButton = document.getElementById('upload-for-share-button');
+export const filePreview = document.getElementById('file-attachment-preview');
+export const attachFlyoutContainer = document.getElementById('attach-flyout-container');
+export const welcomeScreen = document.getElementById('welcome-screen');
+export const welcomeMessageContainer = document.querySelector('#welcome-screen .welcome-message');
+export const suggestionChipsContainer = document.getElementById('suggestion-chips');
+
+// --- ADDED: Lightbox elements ---
+export const lightbox = document.getElementById('image-lightbox');
+export const lightboxImg = document.getElementById('lightbox-img');
+export const lightboxClose = document.querySelector('.lightbox-close');
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\login.js
+// static/js/login.js
+document.addEventListener('DOMContentLoaded', () => {
+    const loginForm = document.getElementById('login-form');
+    const usernameInput = document.getElementById('username');
+
+    if (loginForm) {
+        loginForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            // Basic validation: just check if username is not empty.
+            if (usernameInput.value.trim() !== '') {
+                // In a real app, you would perform actual authentication here.
+                // For this demo, we just redirect.
+                window.location.href = '/chat_app';
+            } else {
+                alert('Please enter a username.');
+            }
+        });
+    }
+});
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\matrix.js
+// Handles the Matrix background effect
+import * as dom from './dom.js';
+
+let matrixAnimationId;
+export function startMatrix() {
+    const ctx = dom.matrixCanvas.getContext('2d'); if (!ctx) return;
+    dom.matrixCanvas.style.display = 'block';
+    dom.matrixCanvas.width = window.innerWidth; dom.matrixCanvas.height = window.innerHeight;
+    const alphabet = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズブヅプエェケセテネヘメレヱゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッンABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const fontSize = 16; const columns = dom.matrixCanvas.width / fontSize;
+    const rainDrops = Array.from({ length: columns }).fill(1);
+    const draw = () => {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.05)'; ctx.fillRect(0, 0, dom.matrixCanvas.width, dom.matrixCanvas.height);
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim();
+        ctx.font = fontSize + 'px monospace';
+        for (let i = 0; i < rainDrops.length; i++) {
+            const text = alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+            ctx.fillText(text, i * fontSize, rainDrops[i] * fontSize);
+            if (rainDrops[i] * fontSize > dom.matrixCanvas.height && Math.random() > 0.975) rainDrops[i] = 0;
+            rainDrops[i]++;
+        }
+    };
+    if (matrixAnimationId) clearInterval(matrixAnimationId);
+    matrixAnimationId = setInterval(draw, 33);
+}
+export function stopMatrix() {
+    if (matrixAnimationId) clearInterval(matrixAnimationId);
+    matrixAnimationId = null;
+    const ctx = dom.matrixCanvas.getContext('2d');
+    if(ctx) ctx.clearRect(0, 0, dom.matrixCanvas.width, dom.matrixCanvas.height);
+    dom.matrixCanvas.style.display = 'none';
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\metrics.js
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\metrics.js
+// Handles live system metrics via WebSocket
+
+const overviewCpuCard = document.getElementById('overview-cpu');
+const overviewRamCard = document.getElementById('overview-ram');
+const overviewNetworkCard = document.getElementById('overview-network');
+const overviewGpuContainer = document.getElementById('overview-gpu-container');
+const cpuCoresContainer = document.getElementById('cpu-cores-container');
+const diskMetricsContainer = document.getElementById('disk-metrics-container');
+const systemInfoList = document.getElementById('system-info-list');
+const processListBody = document.getElementById('process-list-body');
+
+let renderedPids = new Map();
+
+function getProcessIcon(processName) {
+    const lowerCaseName = processName.toLowerCase();
+    const iconMap = {
+        'chrome.exe': 'fab fa-chrome', 'msedge.exe': 'fab fa-edge', 'firefox.exe': 'fab fa-firefox-browser',
+        'code.exe': 'fas fa-code', 'python.exe': 'fab fa-python', 'svchost.exe': 'fas fa-cog',
+        'explorer.exe': 'fas fa-folder', 'cmd.exe': 'fas fa-terminal', 'powershell.exe': 'fas fa-terminal',
+        'discord.exe': 'fab fa-discord', 'spotify.exe': 'fab fa-spotify', 'steam.exe': 'fab fa-steam',
+    };
+    return iconMap[lowerCaseName] || 'fas fa-microchip';
+}
+
+function getColorForUsage(percentage) {
+    if (percentage > 80) return 'high-usage';
+    if (percentage > 50) return 'medium-usage';
+    return 'low-usage';
+}
+
+function formatSpeed(kbps) {
+    if (kbps > 1024) {
+        return `${(kbps / 1024).toFixed(2)} MB/s`;
+    }
+    return `${kbps.toFixed(1)} KB/s`;
+}
+
+function renderGauge(label, value, percentage, details = '') {
+    const usageClass = getColorForUsage(percentage);
+    return `
+        <div class="metric-gauge">
+            <div class="metric-header">
+                <span class="metric-label">${label}</span>
+                <span class="metric-value">${value}</span>
+            </div>
+            <div class="progress-bar-container" data-usage="${usageClass}">
+                <div class="progress-bar ${usageClass}" style="width: ${percentage}%;"></div>
+            </div>
+            ${details ? `<div class="metric-details">${details}</div>` : ''}
+        </div>
+    `;
+}
+
+function updateInitialInfo(data) {
+    systemInfoList.innerHTML = `
+        <li><span class="info-label">Hostname</span><span class="info-value">${data.hostname}</span></li>
+        <li><span class="info-label">Operating System</span><span class="info-value">${data.os}</span></li>
+        <li><span class="info-label">CPU Architecture</span><span class="info-value">${data.cpu_arch}</span></li>
+        <li><span class="info-label">CPU Cores (Physical)</span><span class="info-value">${data.cpu_cores}</span></li>
+        <li><span class="info-label">CPU Cores (Logical)</span><span class="info-value">${data.cpu_logical_processors}</span></li>
+        <li><span class="info-label">Last Boot Time</span><span class="info-value">${data.boot_time}</span></li>
+    `;
+}
+
+function updateDynamicData(data) {
+    overviewCpuCard.innerHTML = renderGauge('<i class="fas fa-microchip"></i> CPU Total', `${data.cpu.total.toFixed(1)}%`, data.cpu.total);
+    overviewRamCard.innerHTML = renderGauge('<i class="fas fa-memory"></i> RAM', `${data.ram.percent}%`, data.ram.percent, `${data.ram.used_gb} / ${data.ram.total_gb} GB`);
+    overviewNetworkCard.innerHTML = `
+        <h4><i class="fas fa-globe"></i> Network</h4>
+        <div class="network-speed-container">
+            <i class="fas fa-arrow-up"></i><span class="network-speed">${formatSpeed(data.network.upload_kbps)}</span>
+        </div>
+        <div class="network-speed-container">
+            <i class="fas fa-arrow-down"></i><span class="network-speed">${formatSpeed(data.network.download_kbps)}</span>
+        </div>
+    `;
+
+    let cpuCoresHtml = '';
+    data.cpu.per_core.forEach((coreUsage, i) => {
+        cpuCoresHtml += renderGauge(`<i class="fas fa-microchip"></i> Core ${i}`, `${coreUsage.toFixed(1)}%`, coreUsage);
+    });
+    cpuCoresContainer.innerHTML = cpuCoresHtml;
+
+    let diskHtml = '';
+    data.disks.forEach(disk => {
+        diskHtml += renderGauge(`<i class="fas fa-hdd"></i> ${disk.mountpoint}`, `${disk.percent}%`, disk.percent, `${disk.used_gb} / ${disk.total_gb} GB`);
+    });
+    diskMetricsContainer.innerHTML = diskHtml;
+    
+    let gpuHtml = '';
+    data.gpus.forEach((gpu, index) => {
+        gpuHtml += renderGauge(`<i class="fas fa-desktop"></i> GPU ${index}: ${gpu.name}`, `${gpu.load.toFixed(1)}%`, gpu.load);
+        gpuHtml += renderGauge(`<i class="fas fa-memory"></i> VRAM`, `${gpu.memory_percent.toFixed(1)}%`, gpu.memory_percent, `${gpu.memory_used} / ${gpu.memory_total} MB`);
+    });
+    overviewGpuContainer.innerHTML = gpuHtml;
+
+    updateProcessList(data.processes);
+}
+
+function updateProcessList(processes) {
+    if (!processListBody) return;
+    const newPids = new Set(processes.map(p => p.pid));
+    const rowsToRemove = [];
+
+    renderedPids.forEach((row, pid) => {
+        if (!newPids.has(pid)) rowsToRemove.push(row);
+    });
+    rowsToRemove.forEach(row => {
+        row.classList.add('removing');
+        setTimeout(() => {
+            row.remove();
+            renderedPids.delete(parseInt(row.dataset.pid));
+        }, 300);
+    });
+    
+    processes.forEach(proc => {
+        const cpuUsageClass = getColorForUsage(proc.cpu_usage);
+        if (renderedPids.has(proc.pid)) {
+            const row = renderedPids.get(proc.pid);
+            row.cells[1].innerHTML = `<i class="${getProcessIcon(proc.name)}"></i> ${proc.name}`;
+            const cpuCell = row.cells[2];
+            cpuCell.textContent = proc.cpu_usage.toFixed(2);
+            cpuCell.className = `cpu-cell ${cpuUsageClass}`;
+            row.cells[3].textContent = proc.memory_mb.toFixed(2);
+        } else {
+            const newRow = document.createElement('tr');
+            newRow.dataset.pid = proc.pid;
+            newRow.innerHTML = `
+                <td>${proc.pid}</td>
+                <td><i class="${getProcessIcon(proc.name)}"></i> ${proc.name}</td>
+                <td class="cpu-cell ${cpuUsageClass}">${proc.cpu_usage.toFixed(2)}</td>
+                <td>${proc.memory_mb.toFixed(2)}</td>
+            `;
+            processListBody.appendChild(newRow);
+            renderedPids.set(proc.pid, newRow);
+        }
+    });
+}
+
+export function init() {
+    const socket = new WebSocket(`ws://${window.location.host}/ws/metrics`);
+    socket.onopen = () => console.log("Metrics WebSocket connected.");
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        requestAnimationFrame(() => {
+            if (data.type === 'initial') {
+                updateInitialInfo(data);
+            } else if (data.type === 'update') {
+                updateDynamicData(data);
+            }
+        });
+    };
+    socket.onclose = () => {
+        console.log("Metrics WebSocket disconnected. Attempting to reconnect...");
+        setTimeout(init, 3000);
+    };
+    socket.onerror = (error) => {
+        console.error("WebSocket Error:", error);
+        socket.close();
+    };
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\settings.js
+// Handles settings logic and UI
+import * as dom from './dom.js';
+import { startMatrix, stopMatrix } from './matrix.js';
+
+export function saveSettings(settings) {
+    localStorage.setItem('aiSentinelSettings', JSON.stringify(settings));
+}
+
+export function applySettings(settings) {
+    dom.themeStylesheet.href = `/static/themes/${settings.theme}.css`;
+    if (settings.theme === 'matrix') startMatrix(); else stopMatrix();
+    dom.themeSelector.querySelectorAll('button').forEach(btn => btn.classList.toggle('active', btn.dataset.theme === settings.theme));
+
+    dom.enableHistoryToggle.checked = settings.enableHistory;
+    dom.historyLengthSlider.value = settings.historyLength;
+    dom.historyLengthValue.textContent = `${settings.historyLength} messages`;
+
+    document.documentElement.style.fontSize = `${settings.uiScale / 100 * 16}px`;
+    dom.uiScaleSlider.value = settings.uiScale;
+    dom.uiScaleValue.textContent = `${settings.uiScale}%`;
+
+    document.body.style.setProperty('--font-main', settings.fontFamily);
+    dom.fontSelector.value = settings.fontFamily;
+}
+
+export function loadSettings(settings) {
+    const saved = localStorage.getItem('aiSentinelSettings');
+    if (saved) {
+        Object.assign(settings, JSON.parse(saved));
+    }
+    applySettings(settings);
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\js\ui.js
+// C:/Users/xox/Desktop/my-projects/Ai-Sentinel/static/js/ui.js
+// Handles all direct DOM manipulation
+import * as dom from './dom.js';
+
+// --- MODIFIED: The custom markdown parser now uses a placeholder strategy to protect code block formatting. ---
+function renderSimpleMarkdown(text) {
+    // Basic HTML escaping for security.
+    let safeText = text.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">");
+
+    const codeBlocks = [];
+    // 1. Find all code blocks, store them, and replace with a placeholder.
+    safeText = safeText.replace(/```(\w+)?\n?([\s\S]+?)```/g, (match, lang, code) => {
+        const language = lang || 'text';
+        const blockHtml = `<pre><code class="language-${language}">${code.trim()}</code></pre>`;
+        codeBlocks.push(blockHtml);
+        return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+    });
+
+    // 2. Process all other markdown rules on the text that is NOT a code block.
+    safeText = safeText.replace(/`([^`]+?)`/g, '<code>$1</code>');
+    safeText = safeText.replace(/\*\*([^\*]+?)\*\*/g, '<strong>$1</strong>');
+    safeText = safeText.replace(/^\s*[\-\*]\s(.+)/gm, '<ul><li>$1</li></ul>');
+    safeText = safeText.replace(/<\/ul>\s*<ul>/g, '');
+    safeText = safeText.replace(/^\s*###\s(.+)/gm, '<h3>$1</h3>');
+    safeText = safeText.replace(/^\s*##\s(.+)/gm, '<h2>$1</h2>');
+    safeText = safeText.replace(/^\s*#\s(.+)/gm, '<h1>$1</h1>');
+    safeText = safeText.replace(/^\s*>\s(.+)/gm, '<blockquote>$1</blockquote>');
+    safeText = safeText.replace(/<\/blockquote>\s*<blockquote>/g, '<br>');
+
+    // --- ADDED: Link detection ---
+    // This regex finds URLs (http, https, ftp) and wraps them in an anchor tag.
+    const urlRegex = /(\b(https?|ftp):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+    safeText = safeText.replace(urlRegex, "<a href='$1' target='_blank'>$1</a>");
+
+    // 3. Now, convert newlines to <br> tags.
+    safeText = safeText.replace(/\n/g, '<br>');
+
+    // 4. Finally, restore the code blocks from their placeholders.
+    safeText = safeText.replace(/__CODE_BLOCK_(\d+)__/g, (match, index) => {
+        return codeBlocks[parseInt(index, 10)];
+    });
+
+    return safeText;
+}
+
+
+export function openLightbox(src) {
+    if (!dom.lightbox || !dom.lightboxImg) return;
+    dom.lightboxImg.src = src;
+    dom.lightbox.classList.add('visible');
+}
+
+export function closeLightbox() {
+    if (!dom.lightbox) return;
+    dom.lightbox.classList.remove('visible');
+}
+
+export function setLoadingState(isLoading) {
+    dom.messageInput.disabled = isLoading;
+    dom.sendButton.style.display = isLoading ? 'none' : 'flex';
+    dom.attachFileButton.style.display = isLoading ? 'none' : 'flex';
+    dom.stopButton.style.display = isLoading ? 'flex' : 'none';
+    if (!isLoading) dom.messageInput.focus();
+}
+
+function highlightAndEnhanceCodeBlocks(container) {
+    if (typeof hljs === 'undefined') {
+        console.warn("highlight.js not loaded. Code blocks will not be highlighted.");
+        return;
+    }
+
+    const codeBlocks = container.querySelectorAll('pre code');
+    
+    codeBlocks.forEach(code => {
+        const pre = code.parentElement;
+        if (pre.parentElement.classList.contains('code-block-wrapper')) {
+            return;
+        }
+
+        hljs.highlightElement(code);
+
+        const languageClass = Array.from(code.classList).find(c => c.startsWith('language-')) || 'language-text';
+        const language = languageClass.replace('language-', '');
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'code-block-wrapper';
+
+        const header = document.createElement('div');
+        header.className = 'code-block-header';
+        
+        const langSpan = document.createElement('span');
+        langSpan.textContent = language;
+
+        const copyButton = document.createElement('button');
+        copyButton.className = 'copy-code-button';
+        copyButton.innerHTML = '<i class="fa-regular fa-copy"></i> Copy';
+
+        copyButton.addEventListener('click', () => {
+            navigator.clipboard.writeText(code.textContent);
+
+            copyButton.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+            copyButton.classList.add('copied');
+            setTimeout(() => {
+                copyButton.innerHTML = '<i class="fa-regular fa-copy"></i> Copy';
+                copyButton.classList.remove('copied');
+            }, 2000);
+        });
+
+        header.appendChild(langSpan);
+        header.appendChild(copyButton);
+
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(header);
+        wrapper.appendChild(pre);
+    });
+}
+
+export function appendMessage(sender, text = "", options = {}) {
+    const { file, isStreaming } = options;
+
+    const wrapper = document.createElement("div");
+    wrapper.classList.add("message-wrapper", sender === "user" ? "user-message" : "sentinel-message");
+
+    const avatar = document.createElement("div");
+    avatar.classList.add("avatar");
+    const iconClass = sender === "user" ? "fa-solid fa-user-astronaut" : "fa-solid fa-shield-halved";
+    avatar.innerHTML = `<i class="${iconClass}"></i>`;
+    
+    const messageDiv = document.createElement("div");
+    messageDiv.classList.add("message", sender === "user" ? "user-message" : "sentinel-message");
+
+    if (isStreaming) { messageDiv.classList.add("streaming"); }
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.innerHTML = renderSimpleMarkdown(text);
+    messageDiv.appendChild(contentDiv);
+    
+    if (file && file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const imgContainer = document.createElement('div');
+            imgContainer.className = 'image-attachment-container';
+            const img = document.createElement('img');
+            img.src = e.target.result;
+            img.alt = 'Image preview';
+            img.onclick = (event) => {
+                event.stopPropagation(); 
+                openLightbox(e.target.result);
+            };
+            imgContainer.appendChild(img);
+            messageDiv.appendChild(imgContainer);
+        };
+        reader.readAsDataURL(file);
+    } 
+    
+    wrapper.appendChild(avatar);
+    wrapper.appendChild(messageDiv);
+    dom.chatWindow.appendChild(wrapper);
+    dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+
+    highlightAndEnhanceCodeBlocks(messageDiv);
+
+    return contentDiv;
+}
+
+export function appendGeneratedImageMessage(prompt, imageUrl, state) {
+    const contentDiv = appendMessage("sentinel");
+    contentDiv.innerHTML = renderSimpleMarkdown(`Here is the image I generated based on your prompt: <blockquote>${prompt}</blockquote>`);
+
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'image-attachment-container';
+    
+    const img = document.createElement('img');
+    img.src = imageUrl;
+    img.alt = prompt;
+    img.style.cursor = 'pointer';
+
+    const loadingIndicator = document.createElement('div');
+    loadingIndicator.textContent = 'Loading image...';
+    imgContainer.appendChild(loadingIndicator);
+    
+    img.onload = () => {
+        loadingIndicator.remove();
+        imgContainer.appendChild(img);
+    };
+    
+    img.onerror = () => {
+        loadingIndicator.textContent = 'Error loading image.';
+    };
+
+    img.onclick = (event) => {
+        event.stopPropagation(); 
+        openLightbox(imageUrl);
+    };
+    
+    contentDiv.parentElement.appendChild(imgContainer);
+    dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+
+    if (state.settings.enableHistory) {
+        state.conversationHistory.push({ role: 'assistant', content: `Generated an image with prompt: "${prompt}"` });
+    }
+}
+
+export function appendScreenshotMessage(imageUrl, state) {
+    const contentDiv = appendMessage("sentinel");
+    
+    contentDiv.innerHTML = renderSimpleMarkdown("I've taken a screenshot of your screen:");
+
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'image-attachment-container';
+    
+    const img = document.createElement('img');
+    img.src = imageUrl;
+    img.alt = 'User screenshot';
+    img.style.cursor = 'pointer';
+
+    const loadingIndicator = document.createElement('div');
+    loadingIndicator.textContent = 'Loading screenshot...';
+    imgContainer.appendChild(loadingIndicator);
+    
+    img.onload = () => {
+        loadingIndicator.remove();
+        imgContainer.appendChild(img);
+    };
+    
+    img.onerror = () => {
+        loadingIndicator.textContent = 'Error loading screenshot.';
+    };
+
+    img.onclick = (event) => {
+        event.stopPropagation(); 
+        openLightbox(imageUrl);
+    };
+    
+    contentDiv.parentElement.appendChild(imgContainer);
+    dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+
+    if (state.settings.enableHistory) {
+        state.conversationHistory.push({ role: 'assistant', content: `Took a screenshot.` });
+    }
+}
+
+export function appendDownloadMessage(filename, downloadUrl, state) {
+    const wrapper = document.createElement("div");
+    wrapper.classList.add("message-wrapper", "sentinel-message");
+
+    const avatar = document.createElement("div");
+    avatar.classList.add("avatar");
+    avatar.innerHTML = `<i class="fa-solid fa-shield-halved"></i>`;
+
+    const messageDiv = document.createElement("div");
+    messageDiv.classList.add("message", "sentinel-message", "download-message");
+    messageDiv.innerHTML = `<p><i class="fa-solid fa-file-arrow-down"></i> Here is the file: <strong>${filename}</strong></p><a href="${downloadUrl}" download class="download-button"><i class="fa-solid fa-download"></i> Download</a>`;
+    
+    wrapper.appendChild(avatar);
+    wrapper.appendChild(messageDiv);
+    dom.chatWindow.appendChild(wrapper);
+    dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+
+    if (state.settings.enableHistory) state.conversationHistory.push({ role: 'assistant', content: `Provided a download link for ${filename}` });
+}
+
+export function appendCapabilityList(tools, state) {
+    const contentDiv = appendMessage("sentinel");
+    contentDiv.innerHTML = ''; 
+
+    const title = document.createElement('div');
+    title.className = 'capability-list-title';
+    title.textContent = "Here is a list of my available commands:";
+    contentDiv.appendChild(title);
+
+    const container = document.createElement('div');
+    container.className = 'capability-list-container';
+
+    tools.forEach((tool, index) => {
+        const item = document.createElement('div');
+        item.className = 'capability-item';
+        item.style.animationDelay = `${index * 0.07}s`;
+
+        item.innerHTML = `
+            <div class="capability-item-header">
+                <span class="capability-name">${tool.name}</span>
+                <span class="capability-signature">${tool.signature}</span>
+            </div>
+            <div class="capability-description">${tool.description}</div>
+        `;
+        container.appendChild(item);
+    });
+
+    contentDiv.appendChild(container);
+    dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+
+    if (state.settings.enableHistory) {
+        state.conversationHistory.push({ role: 'assistant', content: "Displayed the list of available commands." });
+    }
+}
+
+export async function streamResponse(response, contentDiv, state) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    if (!contentDiv) return; 
+    let fullResponse = "";
+    
+    const messageDiv = contentDiv.closest('.message');
+
+    const cursor = document.createElement('span');
+    cursor.className = 'blinking-cursor';
+    cursor.textContent = '|';
+    contentDiv.appendChild(cursor);
+    
+    try {
+        while (true) {
+            if (state.abortController?.signal.aborted) break;
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            fullResponse += chunk;
+            
+            contentDiv.innerHTML = renderSimpleMarkdown(fullResponse);
+            contentDiv.appendChild(cursor);
+
+            dom.chatWindow.scrollTop = dom.chatWindow.scrollHeight;
+        }
+    } finally {
+        cursor.remove();
+        if (messageDiv) messageDiv.classList.remove("streaming");
+        
+        highlightAndEnhanceCodeBlocks(messageDiv);
+
+        if (state.settings.enableHistory) {
+            state.conversationHistory.push({ role: 'assistant', content: fullResponse });
+        }
+    }
+}
+
+export function updateFilePreview(state) {
+    if (state.attachedFile) {
+        const modeText = state.uploadMode === 'analyze' ? 'Ready to analyze:' : (state.uploadMode === 'share' ? 'Ready to share:' : 'Attached to save:');
+        const iconClass = state.uploadMode === 'analyze' ? 'fa-magnifying-glass-chart' : (state.uploadMode === 'share' ? 'fa-share-from-square' : 'fa-floppy-disk');
+        dom.filePreview.innerHTML = `<span><i class="fa-solid ${iconClass}"></i> ${modeText} <strong>${state.attachedFile.name}</strong></span><button id="remove-file-button" title="Remove File"><i class="fa-solid fa-times"></i></button>`;
+        dom.filePreview.style.display = 'flex';
+        document.getElementById('remove-file-button').addEventListener('click', () => {
+            dom.fileInput.value = ''; 
+            state.attachedFile = null;
+            updateFilePreview(state);
+        });
+    } else {
+        dom.filePreview.style.display = 'none';
+    }
+}
+
+export function animateWelcomeMessage(text) {
+    if (!dom.welcomeMessageContainer) return;
+    const words = text.split(' ');
+    dom.welcomeMessageContainer.innerHTML = '';
+    words.forEach((word, index) => {
+        const span = document.createElement('span');
+        span.textContent = word;
+        span.style.animationDelay = `${index * 0.15}s`;
+        dom.welcomeMessageContainer.appendChild(span);
+    });
+}
+
+export function renderSuggestions(suggestions, state) {
+    if (!dom.suggestionChipsContainer) return;
+    dom.suggestionChipsContainer.innerHTML = '';
+    suggestions.forEach(suggestion => {
+        const chip = document.createElement('button');
+        chip.className = 'suggestion-chip';
+        chip.textContent = suggestion;
+        chip.onclick = () => {
+            dom.messageInput.value = suggestion;
+            dom.sendButton.click();
+        };
+        dom.suggestionChipsContainer.appendChild(chip);
+    });
+}
+
+export function hideIntroElements() {
+    dom.welcomeScreen?.classList.add('hidden');
+    dom.suggestionChipsContainer?.classList.add('hidden');
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\themes\dark.css
+:root {
+    --bg-primary: #242526;
+    --bg-secondary: #1c1e21;
+    --bg-input: #3a3b3c;
+    --bg-header: rgba(20, 20, 20, 0.6);
+    --bg-sentinel-msg: #3a3b3c;
+    --bg-user-msg: #0084ff;
+    --bg-action-req: #4a4137;
+    --bg-flyout: #4a4d50;
+    --text-primary: #e4e6eb;
+    --text-secondary: #b0b3b8;
+    --text-user-msg: #ffffff;
+    --text-header: #00aaff;
+    --border-primary: #3a3b3c;
+    --border-accent: #0084ff;
+    --border-action: #ffae42;
+    --scrollbar-thumb: #4a4d50;
+    --scrollbar-track: #242526;
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\themes\light.css
+:root {
+    --bg-primary: #f0f2f5;
+    --bg-secondary: #ffffff;
+    --bg-input: #e4e6eb;
+    --bg-header: rgba(255, 255, 255, 0.7);
+    /* --- MODIFIED: Make AI message background transparent for a cleaner look --- */
+    --bg-sentinel-msg: transparent;
+    --bg-user-msg: #0084ff;
+    --bg-action-req: #fffbe6;
+    --bg-flyout: #ffffff;
+    --text-primary: #050505;
+    --text-secondary: #65676b;
+    --text-user-msg: #ffffff;
+    --text-header: #0084ff;
+    --border-primary: #ced0d4;
+    --border-accent: #0084ff;
+    --border-action: #ffc107;
+    --scrollbar-thumb: #bcc0c4;
+    --scrollbar-track: #f0f2f5;
+}
+
+// C:\Users\xox\Desktop\my-projects\Ai-Sentinel\static\themes\matrix.css
+:root {
+    --font-main: 'Roboto Mono', monospace;
+    --bg-primary: rgba(0, 0, 0, 0.85);
+    --bg-secondary: rgba(0, 0, 0, 0.7);
+    --bg-input: rgba(0, 20, 0, 0.9);
+    --bg-header: rgba(0, 15, 0, 0.8);
+    /* --- MODIFIED: Make AI message background transparent for a cleaner look --- */
+    --bg-sentinel-msg: transparent;
+    --bg-user-msg: #0d5f0d;
+    --bg-action-req: #4a4100;
+    --bg-flyout: #002205;
+    --text-primary: #00ff41;
+    --text-secondary: #00cc34;
+    --text-user-msg: #c1ffc1;
+    --text-header: #00ff41;
+    --border-primary: #00ff41;
+    --border-accent: #39ff14;
+    --border-action: #a4ff00;
+    --scrollbar-thumb: #00ff41;
+    --scrollbar-track: #000;
+}
+
